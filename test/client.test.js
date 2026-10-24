@@ -327,9 +327,9 @@ test('pinned update falls back to window.confirm without dsh primitives', async 
 })
 
 test('Installed hook: self row shows the hint and no Update button', async () => {
-  const self = { ...SNAP, plugins: [row('@local/plugin-updater', 'update-available', { self: true })] }
+  const self = { ...SNAP, plugins: [row('dsh-plugin-updater', 'update-available', { self: true })] }
   const { slot } = await load(self)
-  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['@local/plugin-updater']))
+  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['dsh-plugin-updater']))
   assert.equal(find(tree, (n) => n.type === 'button' && text(n) === 'action.update').length, 0)
   assert.match(text(tree), /row\.self/)
   const head = find(tree, (n) => n.props?.key === 'head')[0]
@@ -394,41 +394,41 @@ test('run snackbar: not for a run done before load, shown for a new run, not in 
 
 // ------------------------------------------------------------------ self-update
 
-const selfRow = (extra = {}) => row('@local/plugin-updater', 'update-available', { self: true, repo: 'me/updater', ...extra })
+const selfRow = (extra = {}) => row('dsh-plugin-updater', 'update-available', { self: true, repo: 'me/updater', ...extra })
 const selfSnap = (plugins, extra = {}) => ({ ...SNAP, selfUpdateAvailable: true, plugins, ...extra })
 const buttonsIn = (tree) => find(tree, (n) => n.type === 'button')
 
 test('self card: outline "Update Plugin Updater" with icon, others keep primary Update', async () => {
   const { slot } = await load(selfSnap([selfRow(), row('a', 'update-available')]))
-  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['@local/plugin-updater', 'a']))
-  const selfBtn = buttonsIn(find(tree, (n) => n.props?.key === 'action:@local/plugin-updater')[0])[0]
+  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['dsh-plugin-updater', 'a']))
+  const selfBtn = buttonsIn(find(tree, (n) => n.props?.key === 'action:dsh-plugin-updater')[0])[0]
   assert.equal(text(selfBtn), 'self.action')
   assert.equal(selfBtn.props.variant, 'outline')
   assert.ok(selfBtn.props.icon, 'has the refresh icon')
   const other = buttonsIn(find(tree, (n) => n.props?.key === 'action:a')[0])[0]
   assert.equal(text(other), 'action.update')
   assert.match(other.props.className, /plu-primary/)
-  assert.match(text(find(tree, (n) => n.props?.key === 'reason:@local/plugin-updater')[0]), /self\.hint/)
+  assert.match(text(find(tree, (n) => n.props?.key === 'reason:dsh-plugin-updater')[0]), /self\.hint/)
 })
 
 test('self card: no control and the old hint when self-update is unavailable', async () => {
   const { slot } = await load(selfSnap([selfRow()], { selfUpdateAvailable: false }))
-  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['@local/plugin-updater']))
-  assert.equal(buttonsIn(find(tree, (n) => n.props?.key === 'action:@local/plugin-updater')[0]).length, 0)
+  const tree = renderHook(slot('plugin-updater.installed-hook'), hostsFor(['dsh-plugin-updater']))
+  assert.equal(buttonsIn(find(tree, (n) => n.props?.key === 'action:dsh-plugin-updater')[0]).length, 0)
   assert.match(text(tree), /row\.self/)
 })
 
 test('self detail page: same distinct control', async () => {
   const { slot } = await load(selfSnap([selfRow()]))
   const action = slot('plugin-updater.update')
-  const tree = render(React.createElement(action.component, { ...action.options.inject(), subject: { kind: 'bundle', pkg: { name: '@local/plugin-updater' } } }))
+  const tree = render(React.createElement(action.component, { ...action.options.inject(), subject: { kind: 'bundle', pkg: { name: 'dsh-plugin-updater' } } }))
   assert.equal(text(tree), 'self.action')
   assert.equal(tree.props.variant, 'outline')
 })
 
 test('self-update always confirms (even unpinned): Cancel sends nothing, confirm sends selfUpdate', async () => {
   const { slot, calls } = await load(selfSnap([selfRow()]))
-  const press = () => buttonsIn(find(renderHook(slot('plugin-updater.installed-hook'), hostsFor(['@local/plugin-updater'])), (n) => n.props?.key === 'action:@local/plugin-updater')[0])[0].props.onClick()
+  const press = () => buttonsIn(find(renderHook(slot('plugin-updater.installed-hook'), hostsFor(['dsh-plugin-updater'])), (n) => n.props?.key === 'action:dsh-plugin-updater')[0])[0].props.onClick()
   const dialog = () => render(React.createElement(slot('plugin-updater.confirm').component, slot('plugin-updater.confirm').options.inject()))
   press()
   let modal = dialog()
@@ -449,7 +449,7 @@ test('self-update always confirms (even unpinned): Cancel sends nothing, confirm
 
 test('self-update confirm adds the pin sentence when pinned', async () => {
   const { slot } = await load(selfSnap([selfRow({ pinnedRef: 'v1.0.0' })]))
-  buttonsIn(find(renderHook(slot('plugin-updater.installed-hook'), hostsFor(['@local/plugin-updater'])), (n) => n.props?.key === 'action:@local/plugin-updater')[0])[0].props.onClick()
+  buttonsIn(find(renderHook(slot('plugin-updater.installed-hook'), hostsFor(['dsh-plugin-updater'])), (n) => n.props?.key === 'action:dsh-plugin-updater')[0])[0].props.onClick()
   const modal = render(React.createElement(slot('plugin-updater.confirm').component, slot('plugin-updater.confirm').options.inject()))
   assert.match(text(modal), /self\.confirm .*pin\.confirm .*v1\.0\.0/)
 })

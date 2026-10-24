@@ -3,7 +3,7 @@
 # startup and on demand, and reinstalls them through the plugin manager.
 - insert:
     - id: plugin-updater
-      name: '@local/plugin-updater'
+      name: 'dsh-plugin-updater'
       # Optional: a GitHub token raises the API rate limit (60 requests/hour
       # unauthenticated). It is only sent to api.github.com.
       # config:

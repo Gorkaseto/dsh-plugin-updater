@@ -1,5 +1,5 @@
 /**
- * Host half of the @local/plugin-updater bundle.
+ * Host half of the dsh-plugin-updater bundle.
  *
  * Lists the profile's bundles installed from GitHub (through dsh's
  * `pluginManager` service, dsh ≥ 0.2), reads the `version` in each
@@ -41,7 +41,7 @@ export const inject = []
 
 const NAMESPACE = 'pluginupdater'
 const REMOTE_MARK = '@deepseek-ai/dsh-typert-protocol/remote-methods'
-const SELF = '@local/plugin-updater'
+const SELF = 'dsh-plugin-updater'
 const BRANCH = 'main'
 const CONCURRENCY = 4
 const TIMEOUT_MS = 15_000

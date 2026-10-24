@@ -136,7 +136,7 @@ test('selfUpdate: failure restores package.json and the lockfile byte for byte',
 })
 
 test('selfUpdate: incompatible and timed-out runs count as failures', async () => {
-  for (const result of [{ exitCode: 0, timedOut: true }, { exitCode: 1, incompatible: [{ name: '@local/plugin-updater' }] }]) {
+  for (const result of [{ exitCode: 0, timedOut: true }, { exitCode: 1, incompatible: [{ name: 'dsh-plugin-updater' }] }]) {
     const { updater } = setup({ run: async () => result })
     await updater.check()
     await updater.selfUpdate().done
