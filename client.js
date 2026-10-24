@@ -48,7 +48,9 @@ window.__ModuleLoader__.load({
     // The page loads its plugin list asynchronously; wait this long for the section.
     const SCROLL_WAIT_MS = 5000
     const SNACKBAR_MS = 6000
+    const TOAST_MS = 3000
     const DISMISS_KEY = 'plugin-updater.toast-dismissed'
+    const SELF_SEEN_KEY = 'plugin-updater.self-updated'
 
     // The native page's markup this plugin attaches to (ui-plugin-manager's
     // `renderGroup` / `PackageCard`): the Installed plugins group, its head
@@ -85,6 +87,11 @@ window.__ModuleLoader__.load({
       'state.unknown': 'update check failed',
       'row.pinned': 'pinned to {ref}',
       'row.self': 'This is the updater itself: update it by uninstalling and reinstalling it.',
+      'self.action': 'Update Plugin Updater',
+      'self.title': 'Update Plugin Updater?',
+      'self.confirm': 'Plugin Updater will replace itself with the version on main ({version}). The Plugins page may reload while it does, and dsh may need a restart to finish.',
+      'self.hint': 'The updater updates itself and then reloads.',
+      'self.done': 'Plugin Updater updated to {version}.',
       'pin.title': 'Update pinned plugin?',
       'pin.titleAll': 'Update pinned plugins?',
       'pin.confirm': '{name} is pinned to {ref}. Updating reinstalls it from main, and it will track main from then on.',
@@ -106,6 +113,7 @@ window.__ModuleLoader__.load({
       'reason.update-failed': 'update failed, previous version kept: {detail}',
       'reason.restore-failed': 'update failed and the previous version could not be restored; reinstall it by hand: {detail}',
       'reason.unsupported': 'the plugin manager is not available',
+      'reason.self-unavailable': 'self-update is not available in this dsh version',
       'reason.error': '{detail}',
     }
 
@@ -132,6 +140,11 @@ window.__ModuleLoader__.load({
       'state.unknown': 'no se pudo comprobar',
       'row.pinned': 'fijado a {ref}',
       'row.self': 'Es el propio actualizador: actualízalo desinstalándolo y volviéndolo a instalar.',
+      'self.action': 'Actualizar Plugin Updater',
+      'self.title': '¿Actualizar Plugin Updater?',
+      'self.confirm': 'Plugin Updater se sustituirá por la versión de main ({version}). La página de Plugins puede recargarse mientras tanto y puede que haya que reiniciar dsh para terminar.',
+      'self.hint': 'El actualizador se actualiza a sí mismo y después se recarga.',
+      'self.done': 'Plugin Updater actualizado a {version}.',
       'pin.title': '¿Actualizar el plugin fijado?',
       'pin.titleAll': '¿Actualizar los plugins fijados?',
       'pin.confirm': '{name} está fijado a {ref}. Al actualizar se reinstala desde main y a partir de entonces seguirá main.',
@@ -153,6 +166,7 @@ window.__ModuleLoader__.load({
       'reason.update-failed': 'la actualización falló, se mantiene la versión anterior: {detail}',
       'reason.restore-failed': 'la actualización falló y no se pudo restaurar la versión anterior; reinstálalo a mano: {detail}',
       'reason.unsupported': 'el gestor de plugins no está disponible',
+      'reason.self-unavailable': 'la autoactualización no está disponible en esta versión de dsh',
       'reason.error': '{detail}',
     }
 
@@ -180,6 +194,9 @@ window.__ModuleLoader__.load({
 .plu-banner.plu-warn { border-color: var(--dsw-alias-state-warn-primary); }
 .plu-banner.plu-err { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
 .plu-toast { position: fixed; z-index: 10001; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px; border-radius: 10px; background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-base); font-family: var(--dsw-font-family); font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,.25); max-width: min(640px, calc(100vw - 32px)); }
+.plu-toast-timed { overflow: hidden; }
+.plu-toast-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: currentColor; opacity: .5; transform-origin: left; animation: plu-toast-timeout linear forwards; }
+@keyframes plu-toast-timeout { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 .plu-toast.plu-err { background: var(--dsw-alias-state-error-primary); color: #fff; }
 .plu-toast button { border: none; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
 `
@@ -211,6 +228,14 @@ window.__ModuleLoader__.load({
 
     function writeDismissed(value) {
       try { window.sessionStorage.setItem(DISMISS_KEY, value) } catch { /* storage unavailable: the toast just shows again next load */ }
+    }
+
+    function readSelfSeen() {
+      try { return window.sessionStorage.getItem(SELF_SEEN_KEY) } catch { return null }
+    }
+
+    function writeSelfSeen(value) {
+      try { window.sessionStorage.setItem(SELF_SEEN_KEY, value) } catch { /* storage unavailable: the Host still marks it announced */ }
     }
 
     // ---------------------------------------------------------------- hosts
@@ -396,15 +421,41 @@ window.__ModuleLoader__.load({
         row.pinnedRef !== null ? h('span', { className: 'plu-badge' }, t('row.pinned', { ref: row.pinnedRef })) : null)
     }
 
-    function CardAction({ row, busy, actions, t }) {
+    // A circular arrow: marks the self-update control apart from per-plugin updates.
+    const REFRESH_ICON = h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+      h('path', { d: 'M21 12a9 9 0 1 1-2.64-6.36' }), h('path', { d: 'M21 3v6h-6' }))
+
+    /** Always asks (pinned or not), then starts the updater's own in-place update. */
+    function startSelfUpdate(t, actions, row) {
+      const pin = row.pinnedRef !== null ? ` ${t('pin.confirm', { name: row.name, ref: row.pinnedRef })}` : ''
+      askConfirm({
+        title: t('self.title'),
+        description: `${t('self.confirm', { version: row.latest })}${pin}`,
+        confirmLabel: t('self.action'),
+      }).then((ok) => { if (ok) actions.selfUpdate() })
+    }
+
+    /** The self-update control: dsh's secondary (outline) button with a refresh icon. */
+    function SelfUpdateButton({ row, busy, actions, t }) {
+      const onClick = () => startSelfUpdate(t, actions, row)
+      if (Primitives !== null) {
+        return h(Primitives.Button, { variant: 'outline', size: 'sm', icon: REFRESH_ICON, disabled: busy, onClick, 'data-plu-self': '' }, t('self.action'))
+      }
+      return h('button', { type: 'button', className: 'plu-btn', disabled: busy, onClick, 'data-plu-self': '' }, REFRESH_ICON, t('self.action'))
+    }
+
+    function CardAction({ row, busy, selfAvailable, actions, t }) {
       if (row.state === 'updating') return h('span', { className: 'plu-hint' }, t('action.updating'))
-      if (row.state !== 'update-available' || row.self) return null
+      if (row.state !== 'update-available') return null
+      if (row.self) return selfAvailable ? h(SelfUpdateButton, { row, busy, actions, t }) : null
       return h('button', { type: 'button', className: 'plu-btn plu-primary', disabled: busy, onClick: () => startUpdate(t, actions, row) },
         t('action.update'))
     }
 
-    function CardReason({ row, t }) {
-      const text = row.self && row.state === 'update-available' ? t('row.self') : reasonText(t, row.reason)
+    function CardReason({ row, selfAvailable, t }) {
+      const text = row.self && row.state === 'update-available'
+        ? t(selfAvailable ? 'self.hint' : 'row.self')
+        : reasonText(t, row.reason)
       if (text === null) return null
       return h('div', { className: `plu-reason${row.state === 'failed' ? ' plu-err' : ''}` }, text)
     }
@@ -439,6 +490,7 @@ window.__ModuleLoader__.load({
 
       if (snap === null) return null
       const busy = busyOf(snap)
+      const selfAvailable = snap.selfUpdateAvailable === true
       const byName = new Map(snap.plugins.map((p) => [p.name, p]))
       const portals = []
       if (mounts.head !== null) portals.push(createPortal(h(SectionHead, { snap, actions, t }), mounts.head, 'head'))
@@ -446,8 +498,8 @@ window.__ModuleLoader__.load({
         const row = byName.get(name)
         if (row === undefined) continue
         portals.push(createPortal(h(CardTag, { row, t }), m.tag, `tag:${name}`))
-        portals.push(createPortal(h(CardAction, { row, busy, actions, t }), m.action, `action:${name}`))
-        portals.push(createPortal(h(CardReason, { row, t }), m.reason, `reason:${name}`))
+        portals.push(createPortal(h(CardAction, { row, busy, selfAvailable, actions, t }), m.action, `action:${name}`))
+        portals.push(createPortal(h(CardReason, { row, selfAvailable, t }), m.reason, `reason:${name}`))
       }
       return h(Fragment, null, portals)
     }
@@ -460,15 +512,21 @@ window.__ModuleLoader__.load({
     }
 
     function DetailBadge({ subject, store, t }) {
-      const row = outdatedRow(useStoreValue(store), subject)
+      const snap = useStoreValue(store)
+      const row = outdatedRow(snap, subject)
       if (row === null) return null
-      return h('span', { className: 'plu-badge plu-new', title: row.self ? t('row.self') : undefined }, t('badge', { version: row.latest }))
+      const title = row.self ? t(snap.selfUpdateAvailable === true ? 'self.hint' : 'row.self') : undefined
+      return h('span', { className: 'plu-badge plu-new', title }, t('badge', { version: row.latest }))
     }
 
     function DetailAction({ subject, store, actions, t }) {
       const snap = useStoreValue(store)
       const row = outdatedRow(snap, subject)
-      if (row === null || row.self) return null
+      if (row === null) return null
+      if (row.self) {
+        if (row.state === 'updating') return h('span', { className: 'plu-hint' }, t('action.updating'))
+        return snap.selfUpdateAvailable === true ? h(SelfUpdateButton, { row, busy: busyOf(snap), actions, t }) : null
+      }
       return h('button', { type: 'button', className: 'plu-btn plu-primary', disabled: busyOf(snap), onClick: () => startUpdate(t, actions, row) },
         row.state === 'updating' ? t('action.updating') : t('action.update'))
     }
@@ -477,14 +535,22 @@ window.__ModuleLoader__.load({
       const snap = useStoreValue(store)
       const first = useStoreValue(firstCheck)
       const [hidden, setHidden] = useState(false)
-      if (hidden || first === null || readDismissed() === String(first.at) || first.count === 0) return null
       // Still the startup result: a later manual check never re-opens the toast.
-      if (snap === null || !snap.supported) return null
+      const visible = !hidden && first !== null && readDismissed() !== String(first.at) && first.count > 0 &&
+        snap !== null && snap.supported
       const close = () => { writeDismissed(String(first.at)); setHidden(true) }
-      return h('div', { className: 'plu-toast', role: 'status' },
+      // Hides by itself; counts as seen, so a reload does not bring it back.
+      useEffect(() => {
+        if (!visible) return undefined
+        const timer = setTimeout(close, TOAST_MS)
+        return () => clearTimeout(timer)
+      }, [visible])
+      if (!visible) return null
+      return h('div', { className: 'plu-toast plu-toast-timed', role: 'status' },
         h('span', null, t('toast', { count: first.count })),
         h('button', { onClick: () => { close(); openPlugins() } }, t('action.view')),
-        h('button', { onClick: close, 'aria-label': t('action.dismiss') }, '✕'))
+        h('button', { onClick: close, 'aria-label': t('action.dismiss') }, '✕'),
+        h('div', { className: 'plu-toast-bar', 'aria-hidden': 'true', style: { animationDuration: `${TOAST_MS}ms` } }))
     }
 
     /** A finished update's summary, shown briefly at the bottom of the window. */
@@ -496,8 +562,11 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer)
       }, [run])
       if (run === null) return null
+      const text = run.kind === 'self'
+        ? t('self.done', { version: run.to })
+        : t(run.kind === 'all' ? 'run.all' : 'run.single', { updated: run.updated, failed: run.failed })
       return h('div', { className: `plu-toast${run.failed > 0 ? ' plu-err' : ''}`, role: 'status' },
-        h('span', null, t(run.kind === 'all' ? 'run.all' : 'run.single', { updated: run.updated, failed: run.failed })),
+        h('span', null, text),
         h('button', { onClick: () => runNotice.set(null), 'aria-label': t('action.dismiss') }, '✕'))
     }
 
@@ -540,6 +609,12 @@ window.__ModuleLoader__.load({
           const at = snap.lastRun?.at ?? null
           if (!primed) { seenRunAt = at; primed = true }
           else if (!snap.updating && at !== null && at !== seenRunAt) { seenRunAt = at; runNotice.set(snap.lastRun) }
+          // The new version announces a self-update once per session (the page may have reloaded meanwhile).
+          const self = snap.selfUpdated
+          if (self && readSelfSeen() !== String(self.at)) {
+            writeSelfSeen(String(self.at))
+            runNotice.set({ kind: 'self', to: self.to, at: self.at })
+          }
           if (firstCheck.get() === null && snap.lastCheckedAt !== null && !snap.checking) {
             firstCheck.set({ at: snap.lastCheckedAt, count: updatable(snap).length })
           }
@@ -582,6 +657,12 @@ window.__ModuleLoader__.load({
             if (busyOf(snap)) return
             if (snap !== null) store.set({ ...snap, updating: true })
             call('pluginupdater/updateAll').catch(() => {}).finally(refresh)
+          },
+          selfUpdate: () => {
+            const snap = store.get()
+            if (busyOf(snap)) return
+            if (snap !== null) store.set({ ...snap, updating: true, plugins: snap.plugins.map((p) => p.self ? { ...p, state: 'updating' } : p) })
+            call('pluginupdater/selfUpdate').catch(() => {}).finally(refresh)
           },
         }
 

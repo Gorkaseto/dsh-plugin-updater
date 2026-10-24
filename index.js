@@ -20,9 +20,19 @@
  * | `check`     | a fresh check; joins the running one if any                 |
  * | `update`    | starts one plugin's update; `{ accepted }`                  |
  * | `updateAll` | starts updating every updatable plugin; `{ accepted }`      |
+ * | `selfUpdate`| starts the updater's own in-place update; `{ accepted }`    |
+ *
+ * The updater never updates itself with remove + install: removing a bundle
+ * stops it first, so the reinstall would come from disposed code. It runs
+ * `pnpm add github:o/r#main` in place through dsh's `runPluginCommand`
+ * (loaded from the installation) and announces the outcome from the new
+ * version, through `<dshHome>/storages/plugin-updater/self-update.json`.
  */
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 export const name = 'plugin-updater'
 // `pluginManager` is optional: on a dsh without it the plugin still loads and
@@ -37,6 +47,10 @@ const CONCURRENCY = 4
 const TIMEOUT_MS = 15_000
 const STARTUP_DELAY_MS = 0
 const SHA_RE = /[0-9a-f]{40}/
+const OPERATIONS = '@deepseek-ai/dsh-plugin-manager/operations'
+const SELF_OUTPUT_BYTES = 64 * 1024
+const SELF_IDLE_MS = 5 * 60_000
+const RESTORED_FILES = ['package.json', 'pnpm-lock.yaml']
 
 // ------------------------------------------------------------------ sources
 
@@ -222,6 +236,30 @@ function changeError(result) {
   return new Error(result.error?.diagnostic ? `${code}: ${result.error.diagnostic}` : code)
 }
 
+// ------------------------------------------------------------------ self-update
+
+/**
+ * dsh's in-place package operation (`runPluginCommand`), loaded from the
+ * installation: this bundle lives outside it, so a bare import cannot resolve.
+ * @param installAnchor - `profileContext.installAnchor`.
+ * @returns the function, or null when this dsh does not ship it.
+ */
+async function loadOperations(installAnchor, importer = (url) => import(url)) {
+  if (typeof installAnchor !== 'string' || installAnchor === '') return null
+  try {
+    const path = createRequire(join(installAnchor, 'package.json')).resolve(OPERATIONS)
+    const mod = await importer(pathToFileURL(path).href)
+    return typeof mod?.runPluginCommand === 'function' ? mod.runPluginCommand : null
+  } catch {
+    return null
+  }
+}
+
+/** The last lines of pnpm's output, for a failure reason. */
+function outputTail(text, lines = 6) {
+  return String(text ?? '').trim().split(/\r?\n/).slice(-lines).join('\n')
+}
+
 // ------------------------------------------------------------------ service
 
 /**
@@ -229,8 +267,20 @@ function changeError(result) {
  * drive it with a fake plugin manager.
  * @param options.manager - returns the `pluginManager` service or undefined.
  * @param options.profileDir - returns the profile directory or undefined.
+ * @param options.profile - returns `profileContext` or undefined (self-update).
+ * @param options.operations - resolves dsh's `runPluginCommand`, or null.
+ * @param options.reconcile - returns a function applying the saved profile live, or null without HMR.
+ * @param options.outcomePath - returns the self-update outcome file's path, or undefined.
+ * @param options.ownVersion - resolves this bundle's own `package.json` version.
  */
-function createUpdater({ manager, profileDir, token, fetchImpl, readText = (p) => readFile(p, 'utf8'), now = () => Date.now() }) {
+function createUpdater({
+  manager, profileDir, token, fetchImpl,
+  profile = () => undefined, operations = async () => null, reconcile = () => null,
+  outcomePath = () => undefined, ownVersion = async () => null,
+  readText = (p) => readFile(p, 'utf8'),
+  writeText = async (p, text) => { await mkdir(dirname(p), { recursive: true }); await writeFile(p, text, 'utf8') },
+  now = () => Date.now(),
+}) {
   let rows = []
   let lastCheckedAt = null
   let checking = null
@@ -239,6 +289,8 @@ function createUpdater({ manager, profileDir, token, fetchImpl, readText = (p) =
   let lastRun = null
   let supported = null
   let checkError = null
+  let selfUpdateAvailable = false
+  let selfUpdated = null
 
   const status = () => ({
     supported: supported ?? manager() !== undefined,
@@ -248,6 +300,8 @@ function createUpdater({ manager, profileDir, token, fetchImpl, readText = (p) =
     lastCheckedAt,
     checkError,
     lastRun,
+    selfUpdateAvailable,
+    selfUpdated,
     plugins: rows.map((row) => ({ ...row })),
   })
 
@@ -279,6 +333,7 @@ function createUpdater({ manager, profileDir, token, fetchImpl, readText = (p) =
       && typeof pm.removeBundle === 'function' && typeof pm.installBundle === 'function'
     if (!supported) { rows = []; return }
     checkError = null
+    selfUpdateAvailable = await operations().catch(() => null) !== null && profile() !== undefined
     let bundles
     try { bundles = await pm.listBundles() } catch (error) { checkError = failureOf(error); return }
     const candidates = []
@@ -397,17 +452,119 @@ function createUpdater({ manager, profileDir, token, fetchImpl, readText = (p) =
     lastRun = { kind: 'all', updated, failed, at: now() }
   })
 
-  return { status, check, update, updateAll }
+  /**
+   * The updater's own in-place update: `pnpm add github:o/r#main` under the
+   * profile lock, so it is never uninstalled. A failed run puts the profile
+   * manifest and lockfile back; a successful one records the outcome before
+   * asking HMR to load the new version, which may dispose this very instance.
+   */
+  const selfUpdateOne = async (row) => {
+    const run = await operations().catch(() => null)
+    const pc = profile()
+    if (run === null || pc === undefined) { patch(row.name, { state: 'failed', reason: { code: 'self-unavailable' } }); return false }
+    current = row.name
+    patch(row.name, { state: 'updating', reason: null })
+    const [owner, repo] = row.repo.split('/')
+    const files = RESTORED_FILES.map((name) => join(pc.dir, name))
+    const snapshot = await Promise.all(files.map((p) => readText(p).catch(() => undefined)))
+    const pnpm = pc.packageManager
+    let result
+    try {
+      result = await run(
+        { profile: pc.name, dir: pc.dir, installAnchor: pc.installAnchor, cwd: pc.cwd ?? pc.dir, home: pc.home },
+        ['add', `github:${owner}/${repo}#${BRANCH}`],
+        {
+          execution: 'service', outputBytes: SELF_OUTPUT_BYTES, idleTimeoutMs: SELF_IDLE_MS,
+          ...pnpm === undefined ? {} : { command: pnpm.command, args: pnpm.args, env: pnpm.env },
+        },
+      )
+    } catch (error) {
+      result = { exitCode: 1, output: error?.message ?? String(error) }
+    }
+    if (result?.exitCode !== 0 || result.timedOut === true || (result.incompatible?.length ?? 0) > 0) {
+      // pnpm has exited: put back what it may have rewritten.
+      for (let i = 0; i < files.length; i++) {
+        if (snapshot[i] !== undefined) await writeText(files[i], snapshot[i]).catch(() => {})
+      }
+      const detail = result?.incompatible?.length ? `incompatible: ${result.incompatible.map((p) => p.name ?? p).join(', ')}` : outputTail(result?.output)
+      patch(row.name, { state: 'failed', reason: { code: 'update-failed', detail: detail || `exit ${result?.exitCode}` } })
+      current = null
+      return false
+    }
+    let to = row.latest
+    try { to = JSON.parse(await readText(join(pc.dir, 'node_modules', ...row.name.split('/'), 'package.json'))).version ?? to } catch { /* keep main's version */ }
+    const path = outcomePath()
+    if (path !== undefined) {
+      await writeText(path, JSON.stringify({ from: row.installed, to, at: now(), announced: false }, null, 2)).catch(() => {})
+    }
+    patch(row.name, { installed: to, source: `github:${owner}/${repo}#${BRANCH}`, pinnedRef: null, state: 'up-to-date', restartRequired: false })
+    current = null
+    const apply = reconcile()
+    if (apply === null) { patch(row.name, { restartRequired: true }); return true }
+    try {
+      const outcome = await apply()
+      if (outcome?.restartReason !== undefined || (outcome?.pending?.length ?? 0) > 0) patch(row.name, { restartRequired: true })
+    } catch {
+      patch(row.name, { restartRequired: true })
+    }
+    return true
+  }
+
+  const selfUpdate = () => {
+    const row = rows.find((r) => r.self)
+    if (row === undefined || row.state !== 'update-available') return { accepted: false }
+    return exclusive(async () => {
+      if (!(await selfUpdateOne(row))) lastRun = { kind: 'single', name: row.name, updated: 0, failed: 1, at: now() }
+    })
+  }
+
+  /**
+   * At startup: announce a self-update this version is the result of, once.
+   * @returns the announced outcome, or null.
+   */
+  const loadSelfOutcome = async () => {
+    const path = outcomePath()
+    if (path === undefined) return null
+    let outcome
+    try { outcome = JSON.parse(await readText(path)) } catch { return null }
+    if (outcome === null || typeof outcome !== 'object' || outcome.announced === true) return null
+    const version = await ownVersion().catch(() => null)
+    if (typeof outcome.to !== 'string' || outcome.to !== version) return null
+    selfUpdated = { from: outcome.from ?? null, to: outcome.to, at: outcome.at ?? now() }
+    await writeText(path, JSON.stringify({ ...outcome, announced: true }, null, 2)).catch(() => {})
+    return selfUpdated
+  }
+
+  return { status, check, update, updateAll, selfUpdate, loadSelfOutcome }
 }
 
 // ------------------------------------------------------------------ plugin
 
+async function readOwnVersion() {
+  return JSON.parse(await readFile(new URL('./package.json', import.meta.url), 'utf8')).version ?? null
+}
+
 export function apply(ctx, config = {}) {
+  const profile = () => ctx.get('profileContext') ?? undefined
+  let operations
   const updater = createUpdater({
     manager: () => ctx.get('pluginManager') ?? undefined,
-    profileDir: () => ctx.get('profileContext')?.dir,
+    profileDir: () => profile()?.dir,
     token: config?.githubToken,
+    profile,
+    operations: () => (operations ??= loadOperations(profile()?.installAnchor)),
+    reconcile: () => {
+      const hmr = ctx.get('hmr')
+      return typeof hmr?.reconcileProfile === 'function' ? () => hmr.reconcileProfile() : null
+    },
+    outcomePath: () => {
+      const home = profile()?.home ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
+      return join(home, 'storages', 'plugin-updater', 'self-update.json')
+    },
+    ownVersion: readOwnVersion,
   })
+  // A self-update this version is the result of is announced once, then marked.
+  updater.loadSelfOutcome().catch(() => {})
 
   class PluginUpdater {
     /** The current snapshot: rows, flags, last check time and last run. */
@@ -434,6 +591,12 @@ export function apply(ctx, config = {}) {
       const { accepted } = updater.updateAll()
       return { accepted }
     }
+
+    /** Start the updater's own in-place update; never part of `updateAll`. */
+    async selfUpdate() {
+      const { accepted } = updater.selfUpdate()
+      return { accepted }
+    }
   }
 
   const direct = (method) => Object.freeze({ method, invocation: Object.freeze({ kind: 'direct' }) })
@@ -441,7 +604,7 @@ export function apply(ctx, config = {}) {
     configurable: true,
     value: Object.freeze({
       version: 1,
-      methods: Object.freeze(['status', 'check', 'update', 'updateAll'].map(direct)),
+      methods: Object.freeze(['status', 'check', 'update', 'updateAll', 'selfUpdate'].map(direct)),
     }),
   })
 
@@ -459,4 +622,4 @@ export function apply(ctx, config = {}) {
   else startup(ctx)
 }
 
-export const __test__ = { parseGithubSource, parseVersion, compareVersions, lockedCommit, fetchMainVersion, createUpdater, mapLimit, SELF }
+export const __test__ = { parseGithubSource, parseVersion, compareVersions, lockedCommit, fetchMainVersion, createUpdater, mapLimit, loadOperations, readOwnVersion, SELF }
