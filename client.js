@@ -1,5 +1,5 @@
 /**
- * Plugin updater — Client half of the @local/plugin-updater bundle.
+ * Plugin updater — Client half of the dsh-plugin-updater bundle.
  *
  * Everything renders inside dsh's native Plugins page (`main` panel
  * `plugins`, from `@deepseek-ai/dsh-client-ui-plugin-manager`), with no tab
@@ -29,7 +29,7 @@
  * tokens under this plugin's `plu-` prefix.
  */
 window.__ModuleLoader__.load({
-  id: '@local/plugin-updater',
+  id: 'dsh-plugin-updater',
   factory(require) {
     const React = require('react')
     const { createPortal } = require('react-dom')
@@ -573,19 +573,19 @@ window.__ModuleLoader__.load({
     return {
       inject: ['connection', 'locale', 'slots', 'layout'],
       apply(ctx) {
-        ctx.effect(() => ctx.locale.register(NS, { en, zh: en }), '@local/plugin-updater: locale dictionaries')
+        ctx.effect(() => ctx.locale.register(NS, { en, zh: en }), 'dsh-plugin-updater: locale dictionaries')
         ctx.effect(() => {
           try { return ctx.locale.register(NS, 'es', es) } catch { return () => {} }
-        }, '@local/plugin-updater: es dictionary')
+        }, 'dsh-plugin-updater: es dictionary')
         const t = ctx.locale.bind(NS)
 
         ctx.effect(() => {
           const style = document.createElement('style')
-          style.dataset.plugin = '@local/plugin-updater'
+          style.dataset.plugin = 'dsh-plugin-updater'
           style.textContent = CSS
           document.head.appendChild(style)
           return () => style.remove()
-        }, '@local/plugin-updater: styles')
+        }, 'dsh-plugin-updater: styles')
 
         const call = async (endpoint, args = {}) => {
           const result = await ctx.connection.rpc.call('/api', endpoint, { args })
@@ -670,7 +670,7 @@ window.__ModuleLoader__.load({
           disposed = false
           refresh()
           return () => { disposed = true; clearTimeout(timer) }
-        }, '@local/plugin-updater: status polling')
+        }, 'dsh-plugin-updater: status polling')
         ctx.on('connection/reset', () => { idleTries = 0; refresh() })
 
         const face = { store, actions, t }

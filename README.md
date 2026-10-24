@@ -1,4 +1,4 @@
-# @local/plugin-updater
+# dsh-plugin-updater
 
 A plugin updater for DSH. It finds the plugins in your profile that were
 installed from GitHub, compares each one's installed version with the
@@ -80,7 +80,7 @@ panel), in its existing **Installed plugins** section. There is no extra tab.
 ```yaml
 - insert:
     - id: plugin-updater
-      name: '@local/plugin-updater'
+      name: 'dsh-plugin-updater'
       config:
         githubToken: !!js process.env.GITHUB_TOKEN
 ```
