@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "title": "Actualizador de plugins",
+    "description": "Comprueba los plugins instalados desde GitHub con la versión de package.json en su rama main, al inicio y bajo demanda, y los actualiza desde la página de Plugins."
+  },
+  "version": {
+    "latestTagged": "última con tag",
+    "latestUntagged": "última sin tag (main)",
+    "select": "Seleccionar versión"
+  },
+  "action": {
+    "switchVersion": "Cambiar versión",
+    "install": "Instalar"
+  }
+}

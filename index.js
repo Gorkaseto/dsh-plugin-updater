@@ -202,6 +202,106 @@ async function fetchMainVersion(owner, repo, { token, fetchImpl = globalThis.fet
   return { version: manifest.version.trim(), sha }
 }
 
+const TAGS_CACHE_MS = 5 * 60_000
+const repoVersionsCache = new Map()
+
+/**
+ * Discovered tags and versions for a GitHub repository.
+ * @returns `{ versions: Array<{ label, ref, sha?, isLatestTagged, isLatestUntagged }>, defaultRef: string, latestTagged: string | null }`
+ */
+async function fetchRepoVersions(owner, repo, { token, fetchImpl = globalThis.fetch, timeoutMs = TIMEOUT_MS, signal, cache = true } = {}) {
+  const cacheKey = `${owner}/${repo}`
+  if (cache) {
+    const entry = repoVersionsCache.get(cacheKey)
+    if (entry && entry.expiresAt > Date.now()) {
+      return entry.data
+    }
+  }
+
+  const get = async (url, headers) => {
+    const timeout = AbortSignal.timeout(timeoutMs)
+    try {
+      return await fetchImpl(url, { headers, signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]) })
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new CheckFailure('timeout')
+      throw new CheckFailure('network', error?.cause?.code ?? error?.message)
+    }
+  }
+
+  const path = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+  const apiHeaders = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-updater' }
+  if (typeof token === 'string' && token !== '') apiHeaders.Authorization = `Bearer ${token}`
+
+  const res = await get(`https://api.github.com/repos/${path}/tags?per_page=100`, apiHeaders)
+  if (res.status === 404 || res.status === 422) {
+    throw new CheckFailure('not-found')
+  } else if (!res.ok) {
+    throw new CheckFailure('http', String(res.status))
+  }
+
+  let tagList
+  try {
+    tagList = JSON.parse(await res.text())
+  } catch {
+    throw new CheckFailure('bad-json')
+  }
+  if (!Array.isArray(tagList)) {
+    throw new CheckFailure('bad-json')
+  }
+
+  const valid = []
+  const other = []
+  for (const t of tagList) {
+    if (typeof t?.name !== 'string') continue
+    const sem = parseVersion(t.name)
+    const item = {
+      name: t.name,
+      ref: t.name,
+      sha: t.commit?.sha ?? null,
+      semver: sem,
+    }
+    if (sem !== null) valid.push(item)
+    else other.push(item)
+  }
+
+  // Sort valid semvers descending
+  valid.sort((a, b) => compareVersions(b.name, a.name))
+  const sorted = [...valid, ...other]
+
+  const latestTagged = valid[0]?.name ?? sorted[0]?.name ?? null
+
+  const untaggedEntry = {
+    label: 'latest untagged',
+    ref: BRANCH,
+    isLatestUntagged: true,
+    isLatestTagged: false,
+  }
+
+  let versions = []
+  let defaultRef = BRANCH
+
+  if (sorted.length === 0) {
+    versions = [untaggedEntry]
+    defaultRef = BRANCH
+  } else {
+    versions = sorted.map((t) => ({
+      label: t.name,
+      ref: t.ref,
+      sha: t.sha,
+      isLatestTagged: t.name === latestTagged,
+      isLatestUntagged: false,
+    }))
+    versions.push(untaggedEntry)
+    defaultRef = latestTagged ?? BRANCH
+  }
+
+  const result = { versions, defaultRef, latestTagged }
+  if (cache) {
+    repoVersionsCache.set(cacheKey, { expiresAt: Date.now() + TAGS_CACHE_MS, data: result })
+  }
+  return result
+}
+
 /** Run `task` over `items`, at most `limit` at a time, keeping order. */
 async function mapLimit(items, limit, task) {
   const out = new Array(items.length)
@@ -535,7 +635,93 @@ function createUpdater({
     return selfUpdated
   }
 
-  return { status, check, update, updateAll, selfUpdate, loadSelfOutcome }
+  const installVersionOne = async ({ name, repo, ref = BRANCH, enabled = true }) => {
+    const pm = manager()
+    if (pm === undefined) {
+      if (name) patch(name, { state: 'failed', reason: { code: 'unsupported' } })
+      return false
+    }
+    const [owner, rName] = (repo ?? '').split('/')
+    if (!owner || !rName) return false
+    const existing = rows.find((r) => (name && r.name === name) || r.repo === `${owner}/${rName}`)
+    if (existing?.self) return false
+    const rowName = name ?? existing?.name
+    if (rowName) {
+      current = rowName
+      patch(rowName, { state: 'updating', reason: null })
+    }
+    let oldSha = null
+    const dir = profileDir()
+    if (dir !== undefined && rowName) {
+      try { oldSha = lockedCommit(await readText(join(dir, 'pnpm-lock.yaml')), rowName) } catch { oldSha = null }
+    }
+    let restartRequired = false
+    const note = (result) => {
+      if (result?.application === 'restart-required' || result?.restartReason !== undefined) restartRequired = true
+    }
+    const targetSpec = `github:${owner}/${rName}#${ref}`
+    try {
+      if (existing) {
+        const removed = await pm.removeBundle(rowName)
+        const removeError = changeError(removed)
+        if (removeError !== null) throw Object.assign(removeError, { stage: 'remove' })
+        note(removed)
+      }
+      const installed = await pm.installBundle(targetSpec, { enabled: existing?.enabled ?? enabled })
+      const installError = changeError(installed)
+      if (installError !== null) throw Object.assign(installError, { stage: 'install' })
+      note(installed)
+    } catch (error) {
+      let restored = true
+      if (existing && error.stage !== 'remove') {
+        const spec = oldSha !== null ? `github:${owner}/${rName}#${oldSha}` : existing.source
+        try {
+          const back = await pm.installBundle(spec, { enabled: existing.enabled })
+          restored = changeError(back) === null
+        } catch { restored = false }
+      }
+      if (rowName) {
+        patch(rowName, {
+          state: 'failed',
+          reason: { code: restored ? 'update-failed' : 'restore-failed', detail: error?.message ?? String(error) },
+        })
+      }
+      current = null
+      return false
+    }
+    if (rowName) {
+      let version = null
+      try { version = (await pm.listBundles()).find((b) => b.name === rowName)?.version ?? null } catch { version = null }
+      const installed = version ?? (ref === BRANCH ? existing?.latest : ref.replace(/^v/i, ''))
+      patch(rowName, {
+        installed,
+        source: targetSpec,
+        pinnedRef: ref === BRANCH ? null : ref,
+        state: existing?.latest ? (compareVersions(existing.latest, installed) > 0 ? 'update-available' : 'up-to-date') : 'up-to-date',
+        restartRequired,
+      })
+    }
+    current = null
+    return true
+  }
+
+  const installVersion = ({ name, repo, ref = BRANCH, enabled = true }) => exclusive(async () => {
+    const ok = await installVersionOne({ name, repo, ref, enabled })
+    if (name) {
+      lastRun = { kind: 'single', name, updated: ok ? 1 : 0, failed: ok ? 0 : 1, at: now() }
+    }
+  })
+
+  return {
+    status,
+    check,
+    update,
+    updateAll,
+    selfUpdate,
+    loadSelfOutcome,
+    getVersions: (owner, repo, opts) => fetchRepoVersions(owner, repo, { token, fetchImpl, ...opts }),
+    installVersion,
+  }
 }
 
 // ------------------------------------------------------------------ plugin
@@ -597,6 +783,19 @@ export function apply(ctx, config = {}) {
       const { accepted } = updater.selfUpdate()
       return { accepted }
     }
+
+    /** Query available versions/tags for a GitHub repository. */
+    async versions(params) {
+      const owner = typeof params === 'string' ? params.split('/')[0] : params?.owner
+      const repo = typeof params === 'string' ? params.split('/')[1] : params?.repo
+      return updater.getVersions(owner, repo)
+    }
+
+    /** Install or switch a plugin to a specific version/tag. */
+    async installVersion(params) {
+      const { accepted } = updater.installVersion(params ?? {})
+      return { accepted }
+    }
   }
 
   const direct = (method) => Object.freeze({ method, invocation: Object.freeze({ kind: 'direct' }) })
@@ -604,7 +803,7 @@ export function apply(ctx, config = {}) {
     configurable: true,
     value: Object.freeze({
       version: 1,
-      methods: Object.freeze(['status', 'check', 'update', 'updateAll', 'selfUpdate'].map(direct)),
+      methods: Object.freeze(['status', 'check', 'update', 'updateAll', 'selfUpdate', 'versions', 'installVersion'].map(direct)),
     }),
   })
 
@@ -622,4 +821,4 @@ export function apply(ctx, config = {}) {
   else startup(ctx)
 }
 
-export const __test__ = { parseGithubSource, parseVersion, compareVersions, lockedCommit, fetchMainVersion, createUpdater, mapLimit, loadOperations, readOwnVersion, SELF }
+export const __test__ = { parseGithubSource, parseVersion, compareVersions, lockedCommit, fetchMainVersion, fetchRepoVersions, repoVersionsCache, createUpdater, mapLimit, loadOperations, readOwnVersion, SELF }

@@ -25,8 +25,12 @@ panel), in its existing **Installed plugins** section. There is no extra tab.
   - the reason under the card when a check or an update failed.
 
   Up-to-date and non-GitHub cards are left exactly as dsh draws them.
-- **On an outdated plugin's own page**: an *Update available · x.y.z* badge
-  beside its title and an **Update** button among its head actions.
+- **On a plugin's detail page**: an *Update available · x.y.z* badge
+  beside its title, an **Update** button when outdated, and an interactive **Version Dropdown**
+  listing all available repository release tags plus `latest untagged` to switch versions on demand.
+- **When installing a new plugin**: an interactive version dropdown lets you pick
+  which version to install, defaulting to the latest available tagged release (or `latest untagged`
+  if the repository has no tags).
 - **At startup** a check runs once in the background. When it finds updates,
   a toast says how many; **View** opens the Plugins page and scrolls to
   Installed plugins. The toast hides by itself after 3 seconds; a thin bar
@@ -43,6 +47,13 @@ panel), in its existing **Installed plugins** section. There is no extra tab.
   then reads `package.json` at that exact commit from
   `raw.githubusercontent.com`. Versions are compared with SemVer precedence;
   only a strictly greater `main` version counts as an update.
+- **Version selection & tags.** The updater queries `https://api.github.com/repos/{owner}/{repo}/tags`
+  to discover released versions. Tags are sorted in descending SemVer precedence.
+  - The latest tagged version is pre-selected by default.
+  - A synthetic `latest untagged` option (tracking `main`) is provided for repositories without tags
+    or with unreleased commits on `main`. If a repository has no release tags, `latest untagged` is the default.
+  - Dropdown selectors are available both during new plugin installation and in each plugin's detail view,
+    allowing users to switch or pin to any release with automatic rollback if installation fails.
 - **Updating.** dsh's plugin manager has no update action, so the updater
   does what its UI does: remove the bundle, then install
   `github:owner/repo#main` with the same enabled/disabled state. If the

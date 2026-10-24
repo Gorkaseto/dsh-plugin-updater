@@ -115,6 +115,11 @@ window.__ModuleLoader__.load({
       'reason.unsupported': 'the plugin manager is not available',
       'reason.self-unavailable': 'self-update is not available in this dsh version',
       'reason.error': '{detail}',
+      'version.latestTagged': 'latest tagged',
+      'version.latestUntagged': 'latest untagged',
+      'version.select': 'Select version',
+      'action.switchVersion': 'Switch version',
+      'action.install': 'Install',
     }
 
     const es = {
@@ -168,6 +173,11 @@ window.__ModuleLoader__.load({
       'reason.unsupported': 'el gestor de plugins no está disponible',
       'reason.self-unavailable': 'la autoactualización no está disponible en esta versión de dsh',
       'reason.error': '{detail}',
+      'version.latestTagged': 'última con tag',
+      'version.latestUntagged': 'última sin tag (main)',
+      'version.select': 'Seleccionar versión',
+      'action.switchVersion': 'Cambiar versión',
+      'action.install': 'Instalar',
     }
 
     const CSS = `
@@ -176,6 +186,7 @@ window.__ModuleLoader__.load({
 /* The card title's ::after stretches over the whole card; like the native switch, sit above it. */
 [data-plu-host="action"] { position: relative; z-index: 1; display: flex; align-items: center; flex: none; margin: 0 10px 0 auto; }
 [data-plu-host="reason"] { display: block; }
+[data-plu-host="install"] { margin: 8px 0; }
 .plu-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .plu-grow { flex: 1; }
 .plu-hint { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 1.5; }
@@ -199,6 +210,10 @@ window.__ModuleLoader__.load({
 @keyframes plu-toast-timeout { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 .plu-toast.plu-err { background: var(--dsw-alias-state-error-primary); color: #fff; }
 .plu-toast button { border: none; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.plu-select { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 3px 8px; cursor: pointer; }
+.plu-input { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 4px 8px; }
+.plu-detail-version { display: inline-flex; align-items: center; gap: 8px; margin-right: 8px; }
+.plu-install-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 `
 
     // ---------------------------------------------------------------- store
@@ -276,12 +291,16 @@ window.__ModuleLoader__.load({
      * Mount (or repair) the portal hosts in the Installed plugins section:
      * the head host after the section's head `div`, and tag/action/reason
      * hosts on the cards named in `wanted`. Hosts on other cards are removed.
-     * @returns `{ section, head, cards: Map<name, { tag, action, reason }> }`.
+     * @returns `{ section, head, cards: Map<name, { tag, action, reason }>, install: Element | null }`.
      */
     function attachHosts(doc, wanted) {
       const section = findAll(doc.body, SEL.section)[0] ?? null
       const cards = new Map()
-      if (section === null) return { section: null, head: null, cards }
+      const installEl = findAll(doc.body, { tag: 'DIV', attr: 'data-plugin-install' })[0]
+        ?? findAll(doc.body, { tag: 'SECTION', attr: 'data-plugin-install' })[0]
+        ?? null
+      const install = installEl !== null ? ensureHost(doc, installEl, 'install', null) : null
+      if (section === null) return { section: null, head: null, cards, install }
       const headDiv = nativeChildren(section)[0] ?? null
       const head = ensureHost(doc, section, 'head', headDiv === null ? null : headDiv.nextSibling)
       for (const li of findAll(section, SEL.card)) {
@@ -300,7 +319,7 @@ window.__ModuleLoader__.load({
           reason: ensureHost(doc, li, 'reason', cardHead.nextSibling),
         })
       }
-      return { section, head, cards }
+      return { section, head, cards, install }
     }
 
     function detachHosts(doc) {
@@ -315,7 +334,7 @@ window.__ModuleLoader__.load({
       return nodes.length > 0 && nodes.every(own)
     }
 
-    const sameMounts = (a, b) => a.head === b.head && a.cards.size === b.cards.size
+    const sameMounts = (a, b) => a.head === b.head && a.install === b.install && a.cards.size === b.cards.size
       && [...a.cards].every(([name, m]) => {
         const n = b.cards.get(name)
         return n !== undefined && n.tag === m.tag && n.action === m.action && n.reason === m.reason
@@ -460,10 +479,107 @@ window.__ModuleLoader__.load({
       return h('div', { className: `plu-reason${row.state === 'failed' ? ' plu-err' : ''}` }, text)
     }
 
+    function parseGithubSource(source) {
+      if (typeof source !== 'string') return null
+      const spec = source.trim()
+      const hash = spec.indexOf('#')
+      const base = hash === -1 ? spec : spec.slice(0, hash)
+      const ref = hash === -1 ? '' : spec.slice(hash + 1)
+      const match = /^github:([\w.-]+)\/([\w.-]+)$/i.exec(base)
+        ?? /^([\w.-]+)\/([\w.-]+)$/i.exec(base)
+        ?? /^(?:git\+)?https?:\/\/(?:[^@/]+@)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(base)
+        ?? /^(?:git\+)?ssh:\/\/git@github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/i.exec(base)
+        ?? /^git@github\.com:([\w.-]+)\/([\w.-]+?)(?:\.git)?$/i.exec(base)
+      if (match === null) return null
+      const owner = match[1]
+      const repo = match[2].replace(/\.git$/i, '')
+      if (/(^|&)path:/.test(ref)) return { owner, repo, unsupported: 'path' }
+      const pinned = ref.split('&').find((part) => part !== '' && !part.startsWith('semver:')) ?? null
+      return { owner, repo, pinnedRef: pinned === null || pinned === 'main' ? null : pinned }
+    }
+
+    function VersionDropdown({ versions = [], selectedRef, onChange, disabled, t, className = 'plu-select' }) {
+      return h('select', {
+        className,
+        disabled: disabled || versions.length === 0,
+        value: selectedRef ?? '',
+        onChange: (e) => onChange?.(e.target.value),
+      }, versions.map((v) => {
+        let suffix = ''
+        if (v.isLatestTagged) suffix = ` (${t('version.latestTagged') || 'latest tagged'})`
+        else if (v.isLatestUntagged) suffix = ` (${t('version.latestUntagged') || 'latest untagged'})`
+        return h('option', { key: v.ref, value: v.ref }, `${v.label}${suffix}`)
+      }))
+    }
+
+    function InstallVersionControl({ actions, busy, t }) {
+      const [spec, setSpec] = useState('')
+      const [versionsData, setVersionsData] = useState(null)
+      const [selectedRef, setSelectedRef] = useState(null)
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState(null)
+
+      const onSpecChange = (val) => {
+        setSpec(val)
+        const parsed = parseGithubSource(val)
+        if (parsed && !parsed.unsupported) {
+          setLoading(true)
+          actions.fetchVersions(parsed.owner, parsed.repo)
+            .then((res) => {
+              setVersionsData(res)
+              setSelectedRef(res.defaultRef)
+              setError(null)
+            })
+            .catch((err) => {
+              setError(err.message)
+              setVersionsData(null)
+            })
+            .finally(() => setLoading(false))
+        } else {
+          setVersionsData(null)
+          setSelectedRef(null)
+          setError(null)
+        }
+      }
+
+      const onInstall = () => {
+        const parsed = parseGithubSource(spec)
+        if (!parsed || busy || loading) return
+        const ref = selectedRef ?? versionsData?.defaultRef ?? 'main'
+        actions.installVersion({
+          repo: `${parsed.owner}/${parsed.repo}`,
+          ref,
+        })
+      }
+
+      return h('div', { className: 'plu-install-row' },
+        h('input', {
+          type: 'text',
+          className: 'plu-input',
+          placeholder: 'owner/repo or github:owner/repo',
+          value: spec,
+          onChange: (e) => onSpecChange(e.target.value),
+        }),
+        versionsData && versionsData.versions?.length > 0 ? h(VersionDropdown, {
+          versions: versionsData.versions,
+          selectedRef: selectedRef ?? versionsData.defaultRef,
+          onChange: setSelectedRef,
+          disabled: busy || loading,
+          t,
+        }) : null,
+        h('button', {
+          type: 'button',
+          className: 'plu-btn plu-primary',
+          disabled: busy || loading || !versionsData,
+          onClick: onInstall,
+        }, t('action.install'))
+      )
+    }
+
     /** Watches the Plugins page and renders into the hosts `attachHosts` keeps in place. */
     function InstalledHook({ store, actions, t }) {
       const snap = useStoreValue(store)
-      const [mounts, setMounts] = useState({ head: null, cards: new Map() })
+      const [mounts, setMounts] = useState({ head: null, cards: new Map(), install: null })
       const wantedKey = (snap?.supported ? snap.plugins.filter(showsOnCard).map((p) => p.name) : []).join('\n')
 
       useEffect(() => {
@@ -494,6 +610,7 @@ window.__ModuleLoader__.load({
       const byName = new Map(snap.plugins.map((p) => [p.name, p]))
       const portals = []
       if (mounts.head !== null) portals.push(createPortal(h(SectionHead, { snap, actions, t }), mounts.head, 'head'))
+      if (mounts.install !== null) portals.push(createPortal(h(InstallVersionControl, { actions, busy, t }), mounts.install, 'install'))
       for (const [name, m] of mounts.cards) {
         const row = byName.get(name)
         if (row === undefined) continue
@@ -529,6 +646,65 @@ window.__ModuleLoader__.load({
       }
       return h('button', { type: 'button', className: 'plu-btn plu-primary', disabled: busyOf(snap), onClick: () => startUpdate(t, actions, row) },
         row.state === 'updating' ? t('action.updating') : t('action.update'))
+    }
+
+    function DetailVersionSelector({ subject, store, actions, t }) {
+      const snap = useStoreValue(store)
+      if (snap === null || subject?.kind !== 'bundle') return null
+      const row = snap.plugins.find((p) => p.name === subject.pkg?.name)
+      if (!row || row.self || !row.repo) return null
+
+      const [versionsData, setVersionsData] = useState(null)
+      const [loading, setLoading] = useState(false)
+      const [selectedRef, setSelectedRef] = useState(null)
+
+      useEffect(() => {
+        if (!row.repo) return
+        setLoading(true)
+        const [owner, rName] = row.repo.split('/')
+        if (actions?.fetchVersions) {
+          actions.fetchVersions(owner, rName)
+            .then((res) => {
+              setVersionsData(res)
+              setSelectedRef(row.pinnedRef ?? 'main')
+            })
+            .catch(() => {})
+            .finally(() => setLoading(false))
+        }
+      }, [row.repo, row.pinnedRef])
+
+      if (!versionsData || !versionsData.versions || versionsData.versions.length === 0) return null
+
+      const currentRef = row.pinnedRef ?? 'main'
+      const activeRef = selectedRef ?? currentRef
+      const isDifferent = activeRef !== currentRef
+      const busy = busyOf(snap)
+
+      const onSwitch = () => {
+        if (!isDifferent || busy) return
+        actions.installVersion({
+          name: row.name,
+          repo: row.repo,
+          ref: activeRef,
+          enabled: row.enabled,
+        })
+      }
+
+      return h('div', { className: 'plu-detail-version' },
+        h(VersionDropdown, {
+          versions: versionsData.versions,
+          selectedRef: activeRef,
+          disabled: busy || loading,
+          onChange: setSelectedRef,
+          t,
+        }),
+        isDifferent ? h('button', {
+          type: 'button',
+          className: 'plu-btn plu-primary',
+          disabled: busy || loading,
+          onClick: onSwitch,
+        }, row.state === 'updating' ? t('action.updating') : t('action.switchVersion')) : null
+      )
     }
 
     function StartupToast({ store, firstCheck, openPlugins, t }) {
@@ -664,6 +840,13 @@ window.__ModuleLoader__.load({
             if (snap !== null) store.set({ ...snap, updating: true, plugins: snap.plugins.map((p) => p.self ? { ...p, state: 'updating' } : p) })
             call('pluginupdater/selfUpdate').catch(() => {}).finally(refresh)
           },
+          fetchVersions: (owner, repo) => call('pluginupdater/versions', { owner, repo }),
+          installVersion: ({ name, repo, ref, enabled }) => {
+            const snap = store.get()
+            if (busyOf(snap)) return Promise.resolve()
+            if (snap !== null && name) store.set({ ...snap, updating: true, plugins: snap.plugins.map((p) => p.name === name ? { ...p, state: 'updating' } : p) })
+            return call('pluginupdater/installVersion', { name, repo, ref, enabled }).catch(() => {}).finally(refresh)
+          },
         }
 
         ctx.effect(() => {
@@ -708,6 +891,13 @@ window.__ModuleLoader__.load({
           inject: () => face,
         }, DetailAction))
 
+        ctx.slots.inject('plugins.detail.actions', () => ctx.slots.register({
+          name: 'plugins.detail.actions',
+          id: 'plugin-updater.version-selector',
+          locale: NS,
+          inject: () => face,
+        }, DetailVersionSelector))
+
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({
           name: 'shell.overlay',
           id: 'plugin-updater.startup-toast',
@@ -729,7 +919,7 @@ window.__ModuleLoader__.load({
           inject: () => ({ t }),
         }, ConfirmDialog))
       },
-      __test__: { attachHosts, detachHosts, ownMutation, SEL, HOST },
+      __test__: { attachHosts, detachHosts, ownMutation, SEL, HOST, VersionDropdown, InstallVersionControl, DetailVersionSelector, parseGithubSource },
     }
   },
 })

@@ -2,15 +2,23 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { __test__ } from '../index.js'
 
-const { fetchMainVersion, createUpdater, SELF } = __test__
+const { fetchMainVersion, fetchRepoVersions, repoVersionsCache, createUpdater, SELF } = __test__
 const SHA = 'c'.repeat(40), OLD = 'd'.repeat(40)
 
 const reply = (status, body = '') => ({ ok: status >= 200 && status < 300, status, text: async () => body })
 
-/** A fetch that serves `repos[owner/repo] = { version | status, head?: status }`. */
+/** A fetch that serves `repos[owner/repo] = { version | status, head?: status, tags?: Array, tagsHead?: status }`. */
 function fakeFetch(repos, calls = []) {
   return async (url, init) => {
     calls.push({ url, headers: init?.headers ?? {} })
+    const tagsApi = /api\.github\.com\/repos\/([^/]+)\/([^/]+)\/tags(?:\?.*)?$/.exec(url)
+    if (tagsApi) {
+      const repo = repos[`${tagsApi[1]}/${tagsApi[2]}`]
+      if (repo === undefined) return reply(404)
+      if (repo.throws) throw repo.throws
+      if (repo.tagsHead !== undefined) return reply(repo.tagsHead)
+      return reply(200, JSON.stringify(repo.tags ?? []))
+    }
     const api = /api\.github\.com\/repos\/([^/]+)\/([^/]+)\/commits\/main$/.exec(url)
     if (api) {
       const repo = repos[`${api[1]}/${api[2]}`]
@@ -255,4 +263,114 @@ test('updateAll: continues after a failure and skips self', async () => {
   assert.deepEqual(by, { '@acme/a': 'up-to-date', '@acme/b': 'failed', '@acme/c': 'up-to-date', [SELF]: 'update-available' })
   assert.ok(!pm.calls.some((c) => c[0] === 'remove' && c[1] === SELF))
   assert.equal(snap.updating, false)
+})
+
+test('fetchRepoVersions: retrieves tags, sorts descending semver and selects default', async () => {
+  repoVersionsCache.clear()
+  const calls = []
+  const tags = [
+    { name: 'v1.0.0', commit: { sha: '1111' } },
+    { name: 'v1.2.0', commit: { sha: '2222' } },
+    { name: 'v1.1.5', commit: { sha: '3333' } },
+  ]
+  const result = await fetchRepoVersions('acme', 'foo', {
+    token: 'my-token',
+    fetchImpl: fakeFetch({ 'acme/foo': { tags } }, calls),
+  })
+  assert.equal(calls[0].headers.Authorization, 'Bearer my-token')
+  assert.equal(result.defaultRef, 'v1.2.0')
+  assert.equal(result.latestTagged, 'v1.2.0')
+  assert.equal(result.versions.length, 4) // 3 tags + 1 latest untagged
+  assert.deepEqual(result.versions.map((v) => v.ref), ['v1.2.0', 'v1.1.5', 'v1.0.0', 'main'])
+  assert.equal(result.versions[0].isLatestTagged, true)
+  assert.equal(result.versions[3].isLatestUntagged, true)
+  assert.equal(result.versions[3].ref, 'main')
+})
+
+test('fetchRepoVersions: repository without tags defaults to latest untagged', async () => {
+  repoVersionsCache.clear()
+  const result = await fetchRepoVersions('acme', 'empty', {
+    fetchImpl: fakeFetch({ 'acme/empty': { tags: [] } }),
+  })
+  assert.equal(result.defaultRef, 'main')
+  assert.equal(result.latestTagged, null)
+  assert.equal(result.versions.length, 1)
+  assert.equal(result.versions[0].isLatestUntagged, true)
+  assert.equal(result.versions[0].ref, 'main')
+})
+
+test('fetchRepoVersions: handles mixed semver and non-semver tags', async () => {
+  repoVersionsCache.clear()
+  const tags = [
+    { name: 'beta-test', commit: { sha: '0000' } },
+    { name: 'v2.0.0', commit: { sha: '2000' } },
+    { name: 'nightly', commit: { sha: '9999' } },
+    { name: 'v1.0.0', commit: { sha: '1000' } },
+  ]
+  const result = await fetchRepoVersions('acme', 'mixed', {
+    fetchImpl: fakeFetch({ 'acme/mixed': { tags } }),
+  })
+  assert.equal(result.defaultRef, 'v2.0.0')
+  assert.equal(result.latestTagged, 'v2.0.0')
+  // semver tags first descending, then non-semver, then latest untagged
+  assert.deepEqual(result.versions.map((v) => v.ref), ['v2.0.0', 'v1.0.0', 'beta-test', 'nightly', 'main'])
+})
+
+test('fetchRepoVersions: error cases and rate limits', async () => {
+  repoVersionsCache.clear()
+  const code = (repos) => fetchRepoVersions('acme', 'foo', { fetchImpl: fakeFetch(repos), cache: false }).then(() => 'ok', (e) => e.code)
+  assert.equal(await code({}), 'not-found')
+  assert.equal(await code({ 'acme/foo': { tagsHead: 403 } }), 'http')
+  assert.equal(await code({ 'acme/foo': { tagsHead: 500 } }), 'http')
+  assert.equal(await code({ 'acme/foo': { throws: new TypeError('failed') } }), 'network')
+})
+
+test('fetchRepoVersions: caching returns cached data within TTL', async () => {
+  repoVersionsCache.clear()
+  let fetchCount = 0
+  const fetchImpl = async (url) => {
+    fetchCount++
+    return reply(200, JSON.stringify([{ name: 'v1.0.0' }]))
+  }
+  const res1 = await fetchRepoVersions('acme', 'cached', { fetchImpl, cache: true })
+  const res2 = await fetchRepoVersions('acme', 'cached', { fetchImpl, cache: true })
+  assert.equal(fetchCount, 1)
+  assert.deepEqual(res1, res2)
+})
+
+test('installVersion: installs specific tag and updates row', async () => {
+  const { pm, updater } = setup(
+    [bundle('@acme/foo', 'acme/foo', '1.0.0')],
+    {},
+    { '@acme/foo': { repo: 'acme/foo', main: '1.2.0', old: '1.0.0' } },
+  )
+  await updater.check()
+  const { accepted, done } = updater.installVersion({ name: '@acme/foo', repo: 'acme/foo', ref: 'v1.1.0' })
+  assert.equal(accepted, true)
+  await done
+  const snap = updater.status()
+  const row = snap.plugins.find((p) => p.name === '@acme/foo')
+  assert.equal(row.pinnedRef, 'v1.1.0')
+  assert.equal(row.source, 'github:acme/foo#v1.1.0')
+  assert.ok(pm.calls.some((c) => c[0] === 'remove' && c[1] === '@acme/foo'))
+  assert.ok(pm.calls.some((c) => c[0] === 'install' && c[1] === 'github:acme/foo#v1.1.0'))
+})
+
+test('installVersion: rollback on install failure', async () => {
+  const { pm, updater } = setup(
+    [bundle('@acme/foo', 'acme/foo', '1.0.0')],
+    {},
+    { '@acme/foo': { repo: 'acme/foo', main: '1.2.0', old: '1.0.0' } },
+    { failInstall: (spec) => spec === 'github:acme/foo#v2.0.0' },
+  )
+  await updater.check()
+  const { accepted, done } = updater.installVersion({ name: '@acme/foo', repo: 'acme/foo', ref: 'v2.0.0' })
+  assert.equal(accepted, true)
+  await done
+  const snap = updater.status()
+  const row = snap.plugins.find((p) => p.name === '@acme/foo')
+  assert.equal(row.state, 'failed')
+  assert.equal(row.reason.code, 'update-failed')
+  // Verify rollback install was attempted
+  assert.ok(pm.calls.some((c) => c[0] === 'install' && c[1] === `github:acme/foo#${OLD}`))
 })

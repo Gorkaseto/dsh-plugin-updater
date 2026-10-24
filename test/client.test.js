@@ -6,9 +6,17 @@ import { readFile } from 'node:fs/promises'
 const React = {
   Fragment: 'fragment',
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }),
-  // Tests can force a component's first `useState` value through `React.forcedState`.
+  // Tests can force a component's first `useState` value through `React.forcedState`, or multiple through `React.forcedStates`.
   forcedState: undefined,
-  useState: (initial) => [React.forcedState ?? initial, () => {}],
+  forcedStates: undefined,
+  useState: (initial) => {
+    if (Array.isArray(React.forcedStates) && React.forcedStates.length > 0) {
+      return [React.forcedStates.shift(), () => {}]
+    }
+    const val = React.forcedState !== undefined ? React.forcedState : initial
+    React.forcedState = undefined
+    return [val, () => {}]
+  },
   useEffect: () => {},
   useSyncExternalStore: (subscribe, get) => get(),
 }
@@ -167,6 +175,7 @@ test('client: no Updates tab; registers the Installed hook, detail seats and toa
     ['shell.overlay', 'plugin-updater.installed-hook'],
     ['plugins.detail.badge', 'plugin-updater.badge'],
     ['plugins.detail.actions', 'plugin-updater.update'],
+    ['plugins.detail.actions', 'plugin-updater.version-selector'],
     ['shell.overlay', 'plugin-updater.startup-toast'],
     ['shell.overlay', 'plugin-updater.run-snackbar'],
     ['shell.overlay', 'plugin-updater.confirm'],
@@ -475,4 +484,103 @@ test('self-updated snackbar: shown once per session, not again after a reload', 
   const second = await load(snap, { session })
   const bar2 = second.slot('plugin-updater.run-snackbar')
   assert.equal(render(React.createElement(bar2.component, bar2.options.inject())), null)
+})
+
+test('VersionDropdown: renders options, distinguishing latest tagged and latest untagged', async () => {
+  const { module } = await load()
+  const { VersionDropdown } = module.__test__
+  const versions = [
+    { label: 'v1.2.0', ref: 'v1.2.0', isLatestTagged: true, isLatestUntagged: false },
+    { label: 'v1.0.0', ref: 'v1.0.0', isLatestTagged: false, isLatestUntagged: false },
+    { label: 'latest untagged', ref: 'main', isLatestTagged: false, isLatestUntagged: true },
+  ]
+  let selected = 'v1.2.0'
+  const t = (key) => key
+  const el = render(React.createElement(VersionDropdown, {
+    versions,
+    selectedRef: selected,
+    onChange: (val) => { selected = val },
+    t,
+  }))
+  assert.equal(el.type, 'select')
+  assert.equal(el.children.length, 3)
+  assert.match(text(el.children[0]), /v1\.2\.0 \(version\.latestTagged\)/)
+  assert.match(text(el.children[1]), /v1\.0\.0/)
+  assert.match(text(el.children[2]), /latest untagged \(version\.latestUntagged\)/)
+  assert.equal(el.props.value, 'v1.2.0')
+  el.props.onChange({ target: { value: 'main' } })
+  assert.equal(selected, 'main')
+})
+
+test('InstallVersionControl: mounts on data-plugin-install and installs chosen version', async () => {
+  const { module } = await load()
+  const { attachHosts, InstallVersionControl } = module.__test__
+  const doc = page(['a'])
+  doc.body.appendChild(el('div', { 'data-plugin-install': 'true' }))
+  const mounts = attachHosts(doc, new Set())
+  assert.ok(mounts.install, 'install host mounted')
+  assert.equal(mounts.install.getAttribute('data-plu-host'), 'install')
+
+  let installedArgs = null
+  const mockActions = {
+    fetchVersions: async () => ({
+      versions: [
+        { label: 'v2.0.0', ref: 'v2.0.0', isLatestTagged: true },
+        { label: 'latest untagged', ref: 'main', isLatestUntagged: true },
+      ],
+      defaultRef: 'v2.0.0',
+    }),
+    installVersion: async (args) => { installedArgs = args },
+  }
+  const t = (k) => k
+
+  // Test control directly
+  React.forcedStates = [
+    'acme/myplugin',
+    {
+      versions: [
+        { label: 'v2.0.0', ref: 'v2.0.0', isLatestTagged: true },
+        { label: 'latest untagged', ref: 'main', isLatestUntagged: true },
+      ],
+      defaultRef: 'v2.0.0',
+    },
+    'main',
+  ]
+  try {
+    const ctrl = render(React.createElement(InstallVersionControl, { actions: mockActions, busy: false, t }))
+    assert.equal(ctrl.type, 'div')
+    const button = find(ctrl, (n) => n.type === 'button')[0]
+    assert.equal(text(button), 'action.install')
+    button.props.onClick()
+    assert.deepEqual(installedArgs, { repo: 'acme/myplugin', ref: 'main' })
+  } finally {
+    React.forcedStates = undefined
+  }
+})
+
+test('DetailVersionSelector: renders dropdown on detail page and handles version switch', async () => {
+  const { slot } = await load()
+  const selectorSlot = slot('plugin-updater.version-selector')
+  assert.ok(selectorSlot, 'version-selector slot registered')
+
+  const subject = { kind: 'bundle', pkg: { name: 'a' } }
+  const face = selectorSlot.options.inject()
+  React.forcedState = {
+    versions: [
+      { label: 'v1.1.0', ref: 'v1.1.0', isLatestTagged: true },
+      { label: 'v1.0.0', ref: 'v1.0.0' },
+      { label: 'latest untagged', ref: 'main', isLatestUntagged: true },
+    ],
+    defaultRef: 'v1.1.0',
+    latestTagged: 'v1.1.0',
+  }
+  try {
+    const el = render(React.createElement(selectorSlot.component, { ...face, subject }))
+    assert.ok(el, 'rendered version selector component')
+    assert.equal(el.type, 'div')
+    const select = find(el, (n) => n.type === 'select')[0]
+    assert.ok(select, 'select dropdown exists')
+  } finally {
+    React.forcedState = undefined
+  }
 })
