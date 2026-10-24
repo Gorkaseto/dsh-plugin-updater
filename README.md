@@ -29,7 +29,8 @@ panel), in its existing **Installed plugins** section. There is no extra tab.
   beside its title and an **Update** button among its head actions.
 - **At startup** a check runs once in the background. When it finds updates,
   a toast says how many; **View** opens the Plugins page and scrolls to
-  Installed plugins.
+  Installed plugins. The toast hides by itself after 3 seconds; a thin bar
+  along its bottom shrinks from right to left as the time runs out.
 
 ## How it works
 
@@ -53,6 +54,20 @@ panel), in its existing **Installed plugins** section. There is no extra tab.
   `Modal` and `Button` (`@deepseek-ai/dsh-client-ui-primitives`), with
   **Cancel** and **Update**; only a dsh that does not share those falls back
   to the browser's `confirm`.
+- **Updating the updater itself.** When the updater is installed from GitHub
+  and `main` is newer, its card and its page show **Update Plugin Updater**:
+  an outline button with a refresh icon, unlike the solid **Update** of other
+  plugins. It always asks first, pinned or not, and **Update all** never
+  includes it.
+  - It never uninstalls itself (removing a bundle stops it first). It runs
+    `pnpm add github:owner/repo#main` in place through dsh's
+    `runPluginCommand`, under the same profile lock as the plugin manager.
+  - If that fails, `package.json` and `pnpm-lock.yaml` are put back and the
+    current version keeps running.
+  - On success it writes `<dshHome>/storages/plugin-updater/self-update.json`
+    and asks dsh to load the new version live. When dsh can't, the Installed
+    plugins heading says to restart dsh.
+  - The new version shows *Plugin Updater updated to x.y.z* once.
 
 ## Configuration
 
@@ -96,8 +111,10 @@ dsh plugin --profile web add link:../dsh-plugin-updater
   an update fails with the plugin manager's message; the updater never
   approves builds for you.
 - **Version-based.** New commits that don't bump `version` aren't reported.
-- **No self-update.** If the updater itself is installed from GitHub, its
-  update is shown but must be done by uninstalling and reinstalling it.
+- **Self-update relies on dsh internals.** It loads `runPluginCommand` from
+  `@deepseek-ai/dsh-plugin-manager/operations` out of dsh's installation
+  (`profileContext.installAnchor`). On a dsh without it, the updater's card
+  keeps the "uninstall and reinstall it" hint instead of the button.
 - **Fragile Installed-section hook.** The Installed plugins section and its
   cards have no extension seat. A `shell.overlay` entry watches the page and
   mounts its controls next to `section[data-plugin-group="bundles"]` and
@@ -109,8 +126,9 @@ dsh plugin --profile web add link:../dsh-plugin-updater
 ## Structure
 
 - `index.js` — the Host half. It provides the `pluginupdater` service with
-  `status`, `check`, `update` and `updateAll`, runs the startup check, and
-  serializes updates (one at a time).
+  `status`, `check`, `update`, `updateAll` and `selfUpdate`, runs the startup
+  check, announces a finished self-update, and serializes updates (one at a
+  time).
 - `client.js` — the Client module: the Installed-section hook and the startup
   toast (both `shell.overlay`), the `plugins.detail.badge` and
   `plugins.detail.actions` entries, and the `plugin-updater` locale namespace
