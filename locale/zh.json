@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "插件更新器",
+    "description": "在启动时和按需检查从 GitHub 安装的插件，与其 main 分支 package.json 中的版本进行比较，并可在插件页面中单独或全部更新。"
+  }
+}

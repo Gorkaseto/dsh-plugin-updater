@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin Updater",
+    "description": "Checks plugins installed from GitHub against the package.json version on their main branch, at startup and on demand, and updates one or all of them from the Plugins page."
+  }
+}

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- A puzzle-piece plugin with a circular "refresh" arrow over it. -->
+  <path d="M12 18h12a5 5 0 1 1 10 0h12v12a5 5 0 1 1 0 10v12H34a5 5 0 1 0-10 0H12V40a5 5 0 1 0 0-10z" fill="#cfe3ff" stroke="#2f5fa8" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M40 54a14 14 0 1 0-14-14" fill="none" stroke="#1f9d55" stroke-width="4" stroke-linecap="round"/>
+  <path d="M20 36l6 6 6-6" fill="none" stroke="#1f9d55" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
