@@ -19,6 +19,13 @@ function fakeFetch(repos, calls = []) {
       if (repo.tagsHead !== undefined) return reply(repo.tagsHead)
       return reply(200, JSON.stringify(repo.tags ?? []))
     }
+    const atomApi = /github\.com\/([^/]+)\/([^/]+)\/tags\.atom$/.exec(url)
+    if (atomApi) {
+      const repo = repos[`${atomApi[1]}/${atomApi[2]}`]
+      if (repo === undefined) return reply(404)
+      if (repo.atomBody !== undefined) return reply(200, repo.atomBody)
+      return reply(404)
+    }
     const api = /api\.github\.com\/repos\/([^/]+)\/([^/]+)\/commits\/main$/.exec(url)
     if (api) {
       const repo = repos[`${api[1]}/${api[2]}`]
@@ -323,6 +330,17 @@ test('fetchRepoVersions: error cases and rate limits', async () => {
   assert.equal(await code({ 'acme/foo': { tagsHead: 403 } }), 'http')
   assert.equal(await code({ 'acme/foo': { tagsHead: 500 } }), 'http')
   assert.equal(await code({ 'acme/foo': { throws: new TypeError('failed') } }), 'network')
+})
+
+test('fetchRepoVersions: rate limit falls back to tags.atom feed', async () => {
+  repoVersionsCache.clear()
+  const atomXml = `<feed><entry><title>v3.0.0</title></entry><entry><title>v2.5.0</title></entry></feed>`
+  const result = await fetchRepoVersions('acme', 'ratelimited', {
+    fetchImpl: fakeFetch({ 'acme/ratelimited': { tagsHead: 403, atomBody: atomXml } }),
+    cache: false,
+  })
+  assert.equal(result.defaultRef, 'v3.0.0')
+  assert.deepEqual(result.versions.map((v) => v.ref), ['v3.0.0', 'v2.5.0', 'main'])
 })
 
 test('fetchRepoVersions: caching returns cached data within TTL', async () => {

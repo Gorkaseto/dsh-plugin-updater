@@ -48,3 +48,32 @@ test('apply: without a plugin manager the service reports unsupported and no che
   assert.equal(snap.supported, false)
   assert.equal(snap.lastCheckedAt, null)
 })
+
+test('apply: service.versions handles various argument shapes from RPC or direct calls', async () => {
+  const ctx = fakeCtx({})
+  apply(ctx, {})
+  const service = ctx.provided.pluginupdater
+
+  // Mock globalThis.fetch to avoid network calls during apply test
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify([{ name: 'v1.0.0' }, { name: 'v1.1.0' }]),
+  })
+  try {
+    const res1 = await service.versions({ owner: 'acme', repo: 'pkg1' })
+    assert.deepEqual(res1.versions.map((v) => v.ref), ['v1.1.0', 'v1.0.0', 'main'])
+
+    const res2 = await service.versions({ args: { owner: 'acme', repo: 'pkg2' } })
+    assert.deepEqual(res2.versions.map((v) => v.ref), ['v1.1.0', 'v1.0.0', 'main'])
+
+    const res3 = await service.versions('acme/pkg3')
+    assert.deepEqual(res3.versions.map((v) => v.ref), ['v1.1.0', 'v1.0.0', 'main'])
+
+    const res4 = await service.versions('acme', 'pkg4')
+    assert.deepEqual(res4.versions.map((v) => v.ref), ['v1.1.0', 'v1.0.0', 'main'])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

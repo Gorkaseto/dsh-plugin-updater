@@ -801,30 +801,43 @@ window.__ModuleLoader__.load({
       if (row?.self) return null
 
       let repo = row?.repo
-      if (!repo && subject?.source) {
-        const parsed = parseGithubSource(subject.source)
-        if (parsed && !parsed.unsupported) repo = `${parsed.owner}/${parsed.repo}`
+      if (!repo) {
+        const anySource = subject?.source ?? subject?.pkg?.source ?? subject?.package?.source
+          ?? subject?.pkg?.repository?.url ?? subject?.pkg?.repository
+          ?? subject?.package?.repository?.url ?? subject?.package?.repository
+          ?? subject?.repo
+        if (typeof anySource === 'string') {
+          const parsed = parseGithubSource(anySource)
+          if (parsed && !parsed.unsupported) repo = `${parsed.owner}/${parsed.repo}`
+        }
       }
       if (!repo) return null
+
+      const cleanedRepo = repo.replace(/^github:/i, '').replace(/^git\+https?:\/\/github\.com\//i, '').replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').trim()
+      const parts = cleanedRepo.split('/')
+      const owner = parts[0]
+      const rName = parts[1]
+      if (!owner || !rName) return null
 
       const [versionsData, setVersionsData] = useState(null)
       const [loading, setLoading] = useState(false)
       const [selectedRef, setSelectedRef] = useState(null)
 
       useEffect(() => {
-        if (!repo) return
+        if (!owner || !rName) return
         setLoading(true)
-        const [owner, rName] = repo.split('/')
         if (actions?.fetchVersions) {
           actions.fetchVersions(owner, rName)
             .then((res) => {
-              setVersionsData(res)
-              setSelectedRef((prev) => prev ?? (row?.pinnedRef ?? res.defaultRef ?? 'main'))
+              if (res && Array.isArray(res.versions) && res.versions.length > 0) {
+                setVersionsData(res)
+                setSelectedRef((prev) => prev ?? (row?.pinnedRef ?? res.defaultRef ?? 'main'))
+              }
             })
             .catch(() => {})
             .finally(() => setLoading(false))
         }
-      }, [repo, row?.pinnedRef])
+      }, [owner, rName, row?.pinnedRef])
 
       const currentRef = row?.pinnedRef ?? 'main'
       const activeRef = selectedRef ?? currentRef
@@ -998,7 +1011,16 @@ window.__ModuleLoader__.load({
             if (snap !== null) store.set({ ...snap, updating: true, plugins: snap.plugins.map((p) => p.self ? { ...p, state: 'updating' } : p) })
             call('pluginupdater/selfUpdate').catch(() => {}).finally(refresh)
           },
-          fetchVersions: (owner, repo) => call('pluginupdater/versions', { owner, repo }),
+          fetchVersions: (ownerOrRepo, maybeRepo) => {
+            let owner = ownerOrRepo
+            let repo = maybeRepo
+            if (typeof ownerOrRepo === 'string' && !maybeRepo && ownerOrRepo.includes('/')) {
+              const parts = ownerOrRepo.replace(/^github:/i, '').replace(/\.git$/i, '').split('/')
+              owner = parts[0]
+              repo = parts[1]
+            }
+            return call('pluginupdater/versions', { owner, repo, repoName: repo })
+          },
           installVersion: ({ name, repo, ref, enabled }) => {
             const snap = store.get()
             if (busyOf(snap)) return Promise.resolve()

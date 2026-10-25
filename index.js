@@ -205,11 +205,32 @@ async function fetchMainVersion(owner, repo, { token, fetchImpl = globalThis.fet
 const TAGS_CACHE_MS = 5 * 60_000
 const repoVersionsCache = new Map()
 
+/** Extract release tags from GitHub public tags.atom or releases.atom XML feed. */
+function parseAtomTags(xml) {
+  const tags = []
+  if (typeof xml !== 'string') return tags
+  const entryRegex = /<entry[\s\S]*?<\/entry>/gi
+  let match
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const entry = match[0]
+    const titleMatch = /<title[^>]*>([^<]+)<\/title>/i.exec(entry)
+    if (titleMatch) {
+      const name = titleMatch[1].trim()
+      if (name !== '') tags.push({ name, commit: { sha: null } })
+    }
+  }
+  return tags
+}
+
 /**
  * Discovered tags and versions for a GitHub repository.
  * @returns `{ versions: Array<{ label, ref, sha?, isLatestTagged, isLatestUntagged }>, defaultRef: string, latestTagged: string | null }`
  */
 async function fetchRepoVersions(owner, repo, { token, fetchImpl = globalThis.fetch, timeoutMs = TIMEOUT_MS, signal, cache = true } = {}) {
+  if (!owner || !repo) {
+    throw new CheckFailure('not-found', `${owner}/${repo}`)
+  }
+
   const cacheKey = `${owner}/${repo}`
   if (cache) {
     const entry = repoVersionsCache.get(cacheKey)
@@ -230,22 +251,60 @@ async function fetchRepoVersions(owner, repo, { token, fetchImpl = globalThis.fe
 
   const path = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
   const apiHeaders = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-updater' }
-  if (typeof token === 'string' && token !== '') apiHeaders.Authorization = `Bearer ${token}`
+  const effectiveToken = token ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+  if (typeof effectiveToken === 'string' && effectiveToken !== '') apiHeaders.Authorization = `Bearer ${effectiveToken}`
 
-  const res = await get(`https://api.github.com/repos/${path}/tags?per_page=100`, apiHeaders)
-  if (res.status === 404 || res.status === 422) {
-    throw new CheckFailure('not-found')
-  } else if (!res.ok) {
-    throw new CheckFailure('http', String(res.status))
-  }
+  let tagList = null
+  let apiFailed = false
+  let apiError = null
 
-  let tagList
   try {
-    tagList = JSON.parse(await res.text())
-  } catch {
-    throw new CheckFailure('bad-json')
+    const res = await get(`https://api.github.com/repos/${path}/tags?per_page=100`, apiHeaders)
+    if (res.status === 404 || res.status === 422) {
+      throw new CheckFailure('not-found')
+    } else if (res.ok) {
+      try {
+        const text = await res.text()
+        const parsed = JSON.parse(text)
+        if (Array.isArray(parsed)) tagList = parsed
+      } catch {
+        apiFailed = true
+        apiError = new CheckFailure('bad-json')
+      }
+    } else {
+      apiFailed = true
+      apiError = new CheckFailure('http', String(res.status))
+    }
+  } catch (err) {
+    if (err instanceof CheckFailure && err.code === 'not-found') throw err
+    apiFailed = true
+    apiError = err
   }
+
+  // Fallback: if GitHub REST API rate-limited (403/429) or failed, try public tags.atom or releases.atom on github.com
+  if (!Array.isArray(tagList) && apiFailed) {
+    try {
+      const atomRes = await get(`https://github.com/${path}/tags.atom`, { 'User-Agent': 'dsh-plugin-updater' })
+      if (atomRes?.ok) {
+        const xml = await atomRes.text()
+        const parsed = parseAtomTags(xml)
+        if (parsed.length > 0) tagList = parsed
+      }
+    } catch { /* ignore fallback errors */ }
+    if (!Array.isArray(tagList)) {
+      try {
+        const relRes = await get(`https://github.com/${path}/releases.atom`, { 'User-Agent': 'dsh-plugin-updater' })
+        if (relRes?.ok) {
+          const xml = await relRes.text()
+          const parsed = parseAtomTags(xml)
+          if (parsed.length > 0) tagList = parsed
+        }
+      } catch { /* ignore fallback errors */ }
+    }
+  }
+
   if (!Array.isArray(tagList)) {
+    if (apiError) throw apiError
     throw new CheckFailure('bad-json')
   }
 
@@ -736,7 +795,7 @@ export function apply(ctx, config = {}) {
   const updater = createUpdater({
     manager: () => ctx.get('pluginManager') ?? undefined,
     profileDir: () => profile()?.dir,
-    token: config?.githubToken,
+    token: config?.githubToken ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN,
     profile,
     operations: () => (operations ??= loadOperations(profile()?.installAnchor)),
     reconcile: () => {
@@ -767,7 +826,11 @@ export function apply(ctx, config = {}) {
      * Start updating one plugin; follow progress through `status`.
      * @param name - the bundle's package name.
      */
-    async update(name) {
+    async update(arg1) {
+      let name = arg1
+      if (typeof arg1 === 'object' && arg1 !== null) {
+        name = arg1.args?.name ?? arg1.name
+      }
       const { accepted } = updater.update(name)
       return { accepted }
     }
@@ -785,15 +848,34 @@ export function apply(ctx, config = {}) {
     }
 
     /** Query available versions/tags for a GitHub repository. */
-    async versions(params) {
-      const owner = typeof params === 'string' ? params.split('/')[0] : params?.owner
-      const repo = typeof params === 'string' ? params.split('/')[1] : params?.repo
+    async versions(arg1, arg2) {
+      let owner, repo
+      if (typeof arg1 === 'string' && typeof arg2 === 'string') {
+        owner = arg1
+        repo = arg2
+      } else if (typeof arg1 === 'string' && arg1.includes('/')) {
+        [owner, repo] = arg1.split('/')
+      } else {
+        const p = (typeof arg1 === 'object' && arg1 !== null) ? (arg1.args ?? arg1) : {}
+        if (typeof p === 'string' && p.includes('/')) {
+          [owner, repo] = p.split('/')
+        } else if (typeof p === 'object' && p !== null) {
+          owner = p.owner
+          repo = p.repo ?? p.repoName
+          if (!repo && typeof owner === 'string' && owner.includes('/')) {
+            [owner, repo] = owner.split('/')
+          }
+        }
+      }
+      if (typeof owner === 'string') owner = owner.replace(/^github:/i, '').replace(/\.git$/i, '').trim()
+      if (typeof repo === 'string') repo = repo.replace(/\.git$/i, '').trim()
       return updater.getVersions(owner, repo)
     }
 
     /** Install or switch a plugin to a specific version/tag. */
-    async installVersion(params) {
-      const { accepted } = updater.installVersion(params ?? {})
+    async installVersion(arg1) {
+      const p = (typeof arg1 === 'object' && arg1 !== null && arg1.args) ? arg1.args : (arg1 ?? {})
+      const { accepted } = updater.installVersion(p)
       return { accepted }
     }
   }
