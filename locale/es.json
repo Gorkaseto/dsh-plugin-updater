@@ -8,8 +8,17 @@
     "latestUntagged": "última sin tag (main)",
     "select": "Seleccionar versión"
   },
+  "install": {
+    "title": "Instalar plugin desde GitHub",
+    "desc": "Instala un plugin desde un repositorio de GitHub eligiendo una versión o la última sin tag.",
+    "repoLabel": "Repositorio",
+    "repoPlaceholder": "owner/repo (ej. acme/mi-plugin)",
+    "loading": "Buscando versiones disponibles…"
+  },
   "action": {
+    "installPlugin": "Instalar plugin",
     "switchVersion": "Cambiar versión",
-    "install": "Instalar"
+    "install": "Instalar",
+    "installing": "Instalando…"
   }
 }

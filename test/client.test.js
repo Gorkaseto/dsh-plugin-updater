@@ -179,6 +179,7 @@ test('client: no Updates tab; registers the Installed hook, detail seats and toa
     ['shell.overlay', 'plugin-updater.startup-toast'],
     ['shell.overlay', 'plugin-updater.run-snackbar'],
     ['shell.overlay', 'plugin-updater.confirm'],
+    ['shell.overlay', 'plugin-updater.install-modal'],
   ])
   assert.ok(!registered.some((r) => r.options.name === 'plugins.tab'))
   assert.deepEqual(calls[0], ['pluginupdater/status', {}])
@@ -583,4 +584,76 @@ test('DetailVersionSelector: renders dropdown on detail page and handles version
   } finally {
     React.forcedState = undefined
   }
+})
+
+test('InstallModal and SectionHead: toolbar button opens modal, modal discovers versions and installs', async () => {
+  const { module, slot } = await load()
+  const { installModalOpen, InstallModal } = module.__test__
+
+  // 1. Toolbar has "action.installPlugin" button which opens modal
+  const hookSlot = slot('plugin-updater.installed-hook')
+  const tree = renderHook(hookSlot, hostsFor(['a']))
+  const head = find(tree, (n) => n.type === 'portal' && n.props.key === 'head')[0]
+  const installBtn = find(head, (n) => n.type === 'button' && text(n).includes('action.installPlugin'))[0]
+  assert.ok(installBtn, 'Install plugin button is present in SectionHead toolbar')
+
+  assert.equal(installModalOpen.get(), false)
+  installBtn.props.onClick()
+  assert.equal(installModalOpen.get(), true, 'clicking button opens modal')
+
+  // 2. InstallModal renders with inputs and dropdown
+  let installedArgs = null
+  const mockActions = {
+    fetchVersions: async () => ({
+      versions: [
+        { label: 'v1.5.0', ref: 'v1.5.0', isLatestTagged: true },
+        { label: 'latest untagged', ref: 'main', isLatestUntagged: true },
+      ],
+      defaultRef: 'v1.5.0',
+    }),
+    installVersion: async (args) => { installedArgs = args; return Promise.resolve() },
+  }
+  const t = (k) => k
+
+  // Force state for InstallModal: spec, versionsData, selectedRef
+  React.forcedStates = [
+    'acme/newpkg',
+    {
+      versions: [
+        { label: 'v1.5.0', ref: 'v1.5.0', isLatestTagged: true },
+        { label: 'latest untagged', ref: 'main', isLatestUntagged: true },
+      ],
+      defaultRef: 'v1.5.0',
+    },
+    'v1.5.0',
+  ]
+  try {
+    const modal = render(React.createElement(InstallModal, {
+      actions: mockActions,
+      t,
+      store: { get: () => SNAP, subscribe: () => () => {} },
+    }))
+    assert.ok(modal, 'modal rendered')
+    const button = find(modal, (n) => n.type === 'button' && text(n) === 'action.install')[0]
+    assert.ok(button, 'install button exists')
+    button.props.onClick()
+    assert.deepEqual(installedArgs, { repo: 'acme/newpkg', ref: 'v1.5.0' })
+  } finally {
+    React.forcedStates = undefined
+    installModalOpen.set(false)
+  }
+})
+
+test('DetailVersionSelector: renders immediate fallback select even without prior fetch', async () => {
+  const { slot } = await load()
+  const selectorSlot = slot('plugin-updater.version-selector')
+  const subject = { kind: 'bundle', name: 'a' } // uses subject.name
+  const face = selectorSlot.options.inject()
+
+  const el = render(React.createElement(selectorSlot.component, { ...face, subject }))
+  assert.ok(el, 'rendered version selector component')
+  const select = find(el, (n) => n.type === 'select')[0]
+  assert.ok(select, 'immediate select dropdown exists')
+  assert.equal(select.children.length, 1)
+  assert.match(text(select.children[0]), /v1\.0\.0|main/)
 })

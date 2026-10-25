@@ -118,8 +118,15 @@ window.__ModuleLoader__.load({
       'version.latestTagged': 'latest tagged',
       'version.latestUntagged': 'latest untagged',
       'version.select': 'Select version',
+      'install.title': 'Install GitHub plugin',
+      'install.desc': 'Install a plugin from a GitHub repository at any tagged release or latest untagged.',
+      'install.repoLabel': 'Repository',
+      'install.repoPlaceholder': 'owner/repo (e.g. acme/my-plugin)',
+      'install.loading': 'Fetching available versions…',
+      'action.installPlugin': 'Install plugin',
       'action.switchVersion': 'Switch version',
       'action.install': 'Install',
+      'action.installing': 'Installing…',
     }
 
     const es = {
@@ -176,8 +183,15 @@ window.__ModuleLoader__.load({
       'version.latestTagged': 'última con tag',
       'version.latestUntagged': 'última sin tag (main)',
       'version.select': 'Seleccionar versión',
+      'install.title': 'Instalar plugin desde GitHub',
+      'install.desc': 'Instala un plugin desde un repositorio de GitHub eligiendo una versión o la última sin tag.',
+      'install.repoLabel': 'Repositorio',
+      'install.repoPlaceholder': 'owner/repo (ej. acme/mi-plugin)',
+      'install.loading': 'Buscando versiones disponibles…',
+      'action.installPlugin': 'Instalar plugin',
       'action.switchVersion': 'Cambiar versión',
       'action.install': 'Instalar',
+      'action.installing': 'Instalando…',
     }
 
     const CSS = `
@@ -214,6 +228,10 @@ window.__ModuleLoader__.load({
 .plu-input { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 4px 8px; }
 .plu-detail-version { display: inline-flex; align-items: center; gap: 8px; margin-right: 8px; }
 .plu-install-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.plu-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 10002; display: flex; align-items: center; justify-content: center; }
+.plu-modal { background: var(--dsw-alias-bg-base, #1e1e1e); color: var(--dsw-alias-label-primary, #fff); border: 1px solid var(--dsw-alias-border-l2, #333); border-radius: 12px; padding: 20px; width: 440px; max-width: calc(100vw - 32px); box-shadow: 0 16px 32px rgba(0,0,0,0.4); font-family: var(--dsw-font-family); font-size: 13px; display: flex; flex-direction: column; gap: 14px; }
+.plu-modal h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.plu-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 `
 
     // ---------------------------------------------------------------- store
@@ -358,6 +376,7 @@ window.__ModuleLoader__.load({
 
     // The open confirmation: `{ title, description, confirmLabel, resolve }`, rendered by `ConfirmDialog`.
     const confirmRequest = createStore(null)
+    const installModalOpen = createStore(false)
 
     /** An in-app confirmation; resolves true to go ahead. */
     function askConfirm(request) {
@@ -419,6 +438,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'plu-toolbar' },
           h('span', { className: 'plu-hint plu-grow', title: t('head.hint') },
             snap.lastCheckedAt === null ? t('last.never') : t('last.at', { time: new Date(snap.lastCheckedAt).toLocaleString() })),
+          h('button', { type: 'button', className: 'plu-btn plu-primary', disabled: busy, onClick: () => installModalOpen.set(true), title: t('install.title') },
+            t('action.installPlugin')),
           h('button', { type: 'button', className: 'plu-btn', disabled: busy, onClick: actions.check, title: t('head.hint') },
             snap.checking ? t('action.checking') : t('action.check')),
           ready.length > 0
@@ -576,6 +597,127 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function InstallModal({ actions, t, store }) {
+      const open = useStoreValue(installModalOpen)
+      const snap = useStoreValue(store)
+      const busy = busyOf(snap)
+      const [spec, setSpec] = useState('')
+      const [versionsData, setVersionsData] = useState(null)
+      const [selectedRef, setSelectedRef] = useState(null)
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState(null)
+
+      if (!open) return null
+
+      const onClose = () => {
+        installModalOpen.set(false)
+        setSpec('')
+        setVersionsData(null)
+        setSelectedRef(null)
+        setError(null)
+      }
+
+      const onSpecChange = (val) => {
+        setSpec(val)
+        const parsed = parseGithubSource(val)
+        if (parsed && !parsed.unsupported) {
+          setLoading(true)
+          setError(null)
+          actions.fetchVersions(parsed.owner, parsed.repo)
+            .then((res) => {
+              setVersionsData(res)
+              setSelectedRef(res.defaultRef)
+              setError(null)
+            })
+            .catch((err) => {
+              setError(err.message)
+              setVersionsData(null)
+            })
+            .finally(() => setLoading(false))
+        } else {
+          setVersionsData(null)
+          setSelectedRef(null)
+          setError(null)
+        }
+      }
+
+      const onInstall = () => {
+        const parsed = parseGithubSource(spec)
+        if (!parsed || busy || loading) return
+        const ref = selectedRef ?? versionsData?.defaultRef ?? 'main'
+        actions.installVersion({
+          repo: `${parsed.owner}/${parsed.repo}`,
+          ref,
+        }).then(() => {
+          onClose()
+        })
+      }
+
+      const content = h('div', { className: 'plu-modal-body', style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        h('p', { className: 'plu-hint', style: { margin: 0 } }, t('install.desc')),
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('span', { style: { fontWeight: 500 } }, t('install.repoLabel')),
+          h('input', {
+            type: 'text',
+            className: 'plu-input',
+            placeholder: t('install.repoPlaceholder'),
+            value: spec,
+            autoFocus: true,
+            onChange: (e) => onSpecChange(e.target.value),
+          })
+        ),
+        loading ? h('div', { className: 'plu-hint' }, t('install.loading')) : null,
+        error ? h('div', { className: 'plu-banner plu-err' }, error) : null,
+        versionsData && versionsData.versions?.length > 0 ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('span', { style: { fontWeight: 500 } }, t('version.select')),
+          h(VersionDropdown, {
+            versions: versionsData.versions,
+            selectedRef: selectedRef ?? versionsData.defaultRef,
+            onChange: setSelectedRef,
+            disabled: busy || loading,
+            t,
+          })
+        ) : null
+      )
+
+      if (Primitives !== null) {
+        return h(Primitives.Modal, {
+          open: true,
+          onClose,
+          title: t('install.title'),
+          closeLabel: t('action.dismiss'),
+          description: content,
+          footer: h(Fragment, null,
+            h(Primitives.Button, { variant: 'outline', onClick: onClose }, t('action.cancel')),
+            h(Primitives.Button, {
+              variant: 'primary',
+              disabled: busy || loading || !versionsData,
+              onClick: onInstall,
+            }, busy ? t('action.installing') : t('action.install'))
+          ),
+        })
+      }
+
+      return h('div', { className: 'plu-modal-backdrop', onClick: (e) => { if (e.target === e.currentTarget) onClose() } },
+        h('div', { className: 'plu-modal' },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+            h('h3', null, t('install.title')),
+            h('button', { type: 'button', className: 'plu-btn', onClick: onClose, style: { padding: '2px 6px' } }, '✕')
+          ),
+          content,
+          h('div', { className: 'plu-modal-actions' },
+            h('button', { type: 'button', className: 'plu-btn', onClick: onClose }, t('action.cancel')),
+            h('button', {
+              type: 'button',
+              className: 'plu-btn plu-primary',
+              disabled: busy || loading || !versionsData,
+              onClick: onInstall,
+            }, busy ? t('action.installing') : t('action.install'))
+          )
+        )
+      )
+    }
+
     /** Watches the Plugins page and renders into the hosts `attachHosts` keeps in place. */
     function InstalledHook({ store, actions, t }) {
       const snap = useStoreValue(store)
@@ -650,32 +792,41 @@ window.__ModuleLoader__.load({
 
     function DetailVersionSelector({ subject, store, actions, t }) {
       const snap = useStoreValue(store)
-      if (snap === null || subject?.kind !== 'bundle') return null
-      const row = snap.plugins.find((p) => p.name === subject.pkg?.name)
-      if (!row || row.self || !row.repo) return null
+      if (snap === null) return null
+      const name = subject?.pkg?.name ?? subject?.package?.name ?? subject?.name ?? subject?.id
+      if (!name) return null
+      if (subject?.kind && subject.kind !== 'bundle' && subject.kind !== 'plugin') return null
+
+      const row = snap.plugins?.find((p) => p.name === name)
+      if (row?.self) return null
+
+      let repo = row?.repo
+      if (!repo && subject?.source) {
+        const parsed = parseGithubSource(subject.source)
+        if (parsed && !parsed.unsupported) repo = `${parsed.owner}/${parsed.repo}`
+      }
+      if (!repo) return null
 
       const [versionsData, setVersionsData] = useState(null)
       const [loading, setLoading] = useState(false)
       const [selectedRef, setSelectedRef] = useState(null)
 
       useEffect(() => {
-        if (!row.repo) return
+        if (!repo) return
         setLoading(true)
-        const [owner, rName] = row.repo.split('/')
+        const [owner, rName] = repo.split('/')
         if (actions?.fetchVersions) {
           actions.fetchVersions(owner, rName)
             .then((res) => {
               setVersionsData(res)
-              setSelectedRef(row.pinnedRef ?? 'main')
+              setSelectedRef((prev) => prev ?? (row?.pinnedRef ?? res.defaultRef ?? 'main'))
             })
             .catch(() => {})
             .finally(() => setLoading(false))
         }
-      }, [row.repo, row.pinnedRef])
+      }, [repo, row?.pinnedRef])
 
-      if (!versionsData || !versionsData.versions || versionsData.versions.length === 0) return null
-
-      const currentRef = row.pinnedRef ?? 'main'
+      const currentRef = row?.pinnedRef ?? 'main'
       const activeRef = selectedRef ?? currentRef
       const isDifferent = activeRef !== currentRef
       const busy = busyOf(snap)
@@ -683,16 +834,22 @@ window.__ModuleLoader__.load({
       const onSwitch = () => {
         if (!isDifferent || busy) return
         actions.installVersion({
-          name: row.name,
-          repo: row.repo,
+          name,
+          repo,
           ref: activeRef,
-          enabled: row.enabled,
+          enabled: row?.enabled ?? true,
         })
       }
 
+      const currentLabel = row?.pinnedRef ?? (row?.current ? `v${row.current}` : (row?.installed ? `v${row.installed}` : 'main'))
+      const versions = (versionsData && versionsData.versions && versionsData.versions.length > 0)
+        ? versionsData.versions
+        : [{ label: currentLabel, ref: currentRef, isLatestTagged: false, isLatestUntagged: false }]
+
       return h('div', { className: 'plu-detail-version' },
+        h('span', { className: 'plu-hint', style: { marginRight: '6px' } }, `${t('version.select') || 'Version'}:`),
         h(VersionDropdown, {
-          versions: versionsData.versions,
+          versions,
           selectedRef: activeRef,
           disabled: busy || loading,
           onChange: setSelectedRef,
@@ -703,7 +860,8 @@ window.__ModuleLoader__.load({
           className: 'plu-btn plu-primary',
           disabled: busy || loading,
           onClick: onSwitch,
-        }, row.state === 'updating' ? t('action.updating') : t('action.switchVersion')) : null
+        }, row?.state === 'updating' ? t('action.updating') : t('action.switchVersion')) : null,
+        loading ? h('span', { className: 'plu-hint', style: { marginLeft: '6px' } }, t('action.checking') || '…') : null,
       )
     }
 
@@ -918,8 +1076,15 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ t }),
         }, ConfirmDialog))
+
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'plugin-updater.install-modal',
+          locale: NS,
+          inject: () => face,
+        }, InstallModal))
       },
-      __test__: { attachHosts, detachHosts, ownMutation, SEL, HOST, VersionDropdown, InstallVersionControl, DetailVersionSelector, parseGithubSource },
+      __test__: { attachHosts, detachHosts, ownMutation, SEL, HOST, VersionDropdown, InstallVersionControl, InstallModal, installModalOpen, DetailVersionSelector, parseGithubSource },
     }
   },
 })

@@ -8,8 +8,17 @@
     "latestUntagged": "latest untagged",
     "select": "Select version"
   },
+  "install": {
+    "title": "Install GitHub plugin",
+    "desc": "Install a plugin from a GitHub repository at any tagged release or latest untagged.",
+    "repoLabel": "Repository",
+    "repoPlaceholder": "owner/repo (e.g. acme/my-plugin)",
+    "loading": "Fetching available versions…"
+  },
   "action": {
+    "installPlugin": "Install plugin",
     "switchVersion": "Switch version",
-    "install": "Install"
+    "install": "Install",
+    "installing": "Installing…"
   }
 }
